@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.corrupt-*.json
+data/
+.tmp/

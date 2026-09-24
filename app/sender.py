@@ -1,0 +1,132 @@
+"""Отправка текста в игру.
+
+Режимы вставки (Settings.inject_method):
+  unicode — открыть чат (T) и печатать посимвольно;
+  ctrlv   — открыть чат (T), скопировать текст, нажать Ctrl+V;
+  copy    — v3.2: никаких клавиш, только скопировать в буфер и переключить
+            в окно игры (пользователь сам жмёт T и вставляет Ctrl+V).
+
+Целевое окно игры (Settings.target_title/target_exe, v3.2): если задано,
+программа сама находит окно игры через EnumWindows и переключается на него
+перед нажатием T / после копирования. Fallback — окно, активное до оверлея.
+"""
+from __future__ import annotations
+
+import time
+from typing import Callable, Optional
+
+from PySide6.QtCore import QObject, Signal, Slot
+
+from . import injector, window_utils
+from .models import Settings, TextEntry
+
+
+class Sender(QObject):
+    copy_requested = Signal(str)   # положить текст в буфер (выполняется в GUI-потоке)
+    status = Signal(str)           # сообщение пользователю
+    used = Signal(str)             # id использованной фразы (статистика)
+
+    def __init__(self, settings_getter: Callable[[], Settings],
+                 get_prev_foreground: Callable[[], int] = lambda: 0,
+                 is_overlay_visible: Callable[[], bool] = lambda: False,
+                 hide_overlay: Callable[[], None] = lambda: None,
+                 parent=None):
+        super().__init__(parent)
+        self._settings_getter = settings_getter
+        self._get_prev_foreground = get_prev_foreground
+        self._is_overlay_visible = is_overlay_visible
+        self._hide_overlay = hide_overlay
+
+    # ----------------------------------------------------- целевое окно игры --
+    def _resolve_target_hwnd(self, settings: Settings) -> int:
+        title = (getattr(settings, "target_title", "") or "").strip()
+        if not title:
+            return 0
+        exe = (getattr(settings, "target_exe", "") or "").strip()
+        try:
+            return window_utils.find_target_window(title, exe)
+        except Exception:
+            return 0
+
+    def _focus_game(self, settings: Settings, prev_hwnd: int) -> int:
+        """Фокус на окно игры (по настройке) или на прежнее окно. Возвращает hwnd."""
+        target = self._resolve_target_hwnd(settings)
+        if target:
+            if window_utils.get_foreground_hwnd() != target:
+                if window_utils.focus_window(target):
+                    time.sleep(0.25)
+                    return target
+            else:
+                return target
+        if prev_hwnd:
+            try:
+                if window_utils.focus_window(prev_hwnd):
+                    time.sleep(0.2)
+                    return prev_hwnd
+            except Exception:
+                pass
+        return 0
+
+    # ----------------------------------------------------------------- send --
+    def send_text(self, entry: TextEntry) -> None:
+        settings = self._settings_getter()
+        method = getattr(settings, "inject_method", "unicode") or "unicode"
+
+        prev_hwnd = 0
+        try:
+            if self._is_overlay_visible():
+                prev_hwnd = int(self._get_prev_foreground() or 0)
+                self._hide_overlay()          # безопасно: маршируется в GUI-поток
+                time.sleep(0.22)
+        except Exception:
+            pass
+
+        # --- v3.2: режим «Копировать в буфер» — никаких клавиш вообще ---
+        if method == "copy":
+            self.copy_requested.emit(entry.text)
+            time.sleep(0.3)                   # даём GUI-потоку положить в буфер
+            self._focus_game(settings, prev_hwnd)
+            self.status.emit(
+                f"Скопировано: {entry.title or 'фраза'}. В игре: T → Ctrl+V (Enter сами)"
+            )
+            self.used.emit(entry.id)
+            return
+
+        # --- обычные режимы: сфокусировать игру и открыть чат ---
+        focused = self._focus_game(settings, prev_hwnd)
+        if not focused and (getattr(settings, "target_title", "") or "").strip():
+            self.status.emit("Окно игры не найдено — проверьте «Настройки → Окно игры»")
+
+        injector.press_combo(settings.type_key or "t")
+        time.sleep(max(0.05, (settings.pre_delay_ms or 1000) / 1000.0))
+
+        if method == "ctrlv":
+            self.copy_requested.emit(entry.text)
+            time.sleep(0.25)
+            injector.press_ctrl_v()
+        else:
+            injector.type_text_unicode(entry.text)
+
+        self.status.emit(f"Отправлено: {entry.title or entry.text[:32]}")
+        self.used.emit(entry.id)
+
+
+class SendWorker(QObject):
+    """Мост: отправка выполняется в рабочем потоке, UI не блокируется."""
+
+    requested = Signal(object)
+
+    def __init__(self, sender: Sender, parent=None):
+        super().__init__(parent)
+        self.sender = sender
+        self.requested.connect(self.send)
+
+    @Slot(object)
+    def send(self, entry: TextEntry) -> None:
+        try:
+            self.sender.send_text(entry)
+        except Exception as e:
+            try:
+                self.sender.status.emit(f"Ошибка отправки: {e}")
+            except Exception:
+                pass
