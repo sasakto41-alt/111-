@@ -197,8 +197,11 @@ class Settings:
     gov_menu_hotkey: str = "f7"        # его клавиша открыть/закрыть
     gov_macro_enabled: bool = False    # макрос с окном подтверждения
     gov_macro_hotkey: str = "f8"       # комбинация клавиш макроса
-    gov_macro_action: str = "step2"    # какая команда отправляется
+    gov_macro_action: str = "step2"    # одиночная команда (начальный шаг)
     gov_macro_confirm_sec: int = 5     # задержка кнопки «Да»
+    # v3.6.0: макрос как ПОСЛЕДОВАТЕЛЬНОСТЬ шагов (собирается в меню F7)
+    gov_macro_steps: List[str] = field(default_factory=lambda: ["step2"])
+    gov_macro_step_pause_ms: int = 4000  # пауза между шагами (Enter жмёт пользователь)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -245,6 +248,22 @@ class Settings:
         except Exception:
             self.gov_macro_confirm_sec = 5
         self.gov_macro_confirm_sec = max(0, min(30, self.gov_macro_confirm_sec))
+        # v3.6.0: последовательность шагов макроса (только известные, без дублей)
+        if not isinstance(self.gov_macro_steps, list):
+            self.gov_macro_steps = []
+        clean: List[str] = []
+        for st in self.gov_macro_steps:
+            st = str(st).strip()
+            if st in GOV_MACRO_ACTIONS and st not in clean:
+                clean.append(st)
+        if not clean:
+            clean = [self.gov_macro_action]
+        self.gov_macro_steps = clean[: len(GOV_MACRO_ACTIONS)]
+        try:
+            self.gov_macro_step_pause_ms = int(self.gov_macro_step_pause_ms)
+        except Exception:
+            self.gov_macro_step_pause_ms = 4000
+        self.gov_macro_step_pause_ms = max(500, min(30000, self.gov_macro_step_pause_ms))
 
     def validate(self) -> List[str]:
         errs: List[str] = []

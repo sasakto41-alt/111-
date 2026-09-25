@@ -9,6 +9,18 @@
 Целевое окно игры (Settings.target_title/target_exe, v3.2): если задано,
 программа сама находит окно игры через EnumWindows и переключается на него
 перед нажатием T / после копирования. Fallback — окно, активное до оверлея.
+
+v3.6.0 (починка «нажимаю кнопку — всё зависает»):
+  • скрытие оверлеев больше НЕ вызывается из рабочего потока через
+    QTimer.singleShot — вместо этого сигнал hide_overlays, который Qt сам
+    маршалирует в GUI-поток (очередное соединение). Раньше _do_hide
+    выполнялся в рабочем потоке: фокус/AttachThreadInput из чужого потока
+    могли взаимно блокироваться с GUI-потоком — окна «зависали»;
+  • защита от наложения отправок (busy-guard): пока предыдущая отправка
+    не завершилась, новая игнорируется — раньше несколько нажатий
+    складывались в очередь и печатали каскадом;
+  • каждый этап отправки пишется в журнал с длительностью — если на
+    какой-то машине всё ещё «подвисает», в error.log видно этап.
 """
 from __future__ import annotations
 
@@ -28,19 +40,22 @@ _GAME_EXE_MARKERS = ("majestic", "ragemp", "rage_mp", "rageplugin", "gta5", "gta
 
 class Sender(QObject):
     copy_requested = Signal(str)   # положить текст в буфер (выполняется в GUI-потоке)
+    hide_overlays = Signal()       # v3.6.0: скрыть оверлеи (маршалируется в GUI-поток)
     status = Signal(str)           # сообщение пользователю
     used = Signal(str)             # id использованной фразы (статистика)
 
     def __init__(self, settings_getter: Callable[[], Settings],
                  get_prev_foreground: Callable[[], int] = lambda: 0,
                  is_overlay_visible: Callable[[], bool] = lambda: False,
-                 hide_overlay: Callable[[], None] = lambda: None,
+                 hide_overlay: Optional[Callable[[], None]] = None,
                  parent=None):
         super().__init__(parent)
         self._settings_getter = settings_getter
         self._get_prev_foreground = get_prev_foreground
         self._is_overlay_visible = is_overlay_visible
-        self._hide_overlay = hide_overlay
+        # параметр hide_overlay оставлен для совместимости, но НЕ используется:
+        # скрытие идёт через сигнал hide_overlays (потокобезопасно)
+        self._busy = False
 
     # ----------------------------------------------------- целевое окно игры --
     def _autodetect_game_hwnd(self) -> int:
@@ -74,11 +89,13 @@ class Sender(QObject):
 
     def _focus_game(self, settings: Settings, prev_hwnd: int) -> int:
         """Фокус на окно игры (по настройке) или на прежнее окно. Возвращает hwnd."""
+        t0 = time.monotonic()
         target = self._resolve_target_hwnd(settings)
         if target:
             if window_utils.get_foreground_hwnd() != target:
                 if window_utils.focus_window(target):
                     time.sleep(0.25)
+                    log(f"фокус: игра (hwnd={target}) за {time.monotonic() - t0:.2f} с")
                     return target
             else:
                 return target
@@ -86,22 +103,39 @@ class Sender(QObject):
             try:
                 if window_utils.focus_window(prev_hwnd):
                     time.sleep(0.2)
+                    log(f"фокус: прежнее окно (hwnd={prev_hwnd})")
                     return prev_hwnd
             except Exception:
                 pass
+        log(f"фокус: окно игры НЕ найдено ({time.monotonic() - t0:.2f} с)")
         return 0
 
     # ----------------------------------------------------------------- send --
     def send_text(self, entry: TextEntry) -> None:
+        """Точка входа из рабочего потока. С защитой от наложения отправок."""
+        if self._busy:
+            log("отправка: предыдущая ещё выполняется — запрос пропущен")
+            return
+        self._busy = True
+        t0 = time.monotonic()
+        try:
+            self._send_text_impl(entry)
+        finally:
+            self._busy = False
+            log(f"отправка завершена за {time.monotonic() - t0:.2f} с")
+
+    def _send_text_impl(self, entry: TextEntry) -> None:
         settings = self._settings_getter()
         method = getattr(settings, "inject_method", "unicode") or "unicode"
+        log(f"отправка «{entry.title or entry.text[:24]}»: способ={method}")
 
         prev_hwnd = 0
         try:
             if self._is_overlay_visible():
                 prev_hwnd = int(self._get_prev_foreground() or 0)
-                self._hide_overlay()          # безопасно: маршируется в GUI-поток
-                time.sleep(0.22)
+                # v3.6.0: сигнал — Qt сам выполнит скрытие в GUI-потоке
+                self.hide_overlays.emit()
+                time.sleep(0.25)
         except Exception:
             pass
 
@@ -128,6 +162,7 @@ class Sender(QObject):
         if not focused and (getattr(settings, "target_title", "") or "").strip():
             self.status.emit("Окно игры не найдено — проверьте «Настройки → Окно игры»")
 
+        log(f"ввод: клавиша чата «{settings.type_key or 't'}», пауза {settings.pre_delay_ms} мс")
         injector.press_combo(settings.type_key or "t")
         time.sleep(max(0.05, (settings.pre_delay_ms or 1000) / 1000.0))
 
@@ -136,7 +171,9 @@ class Sender(QObject):
             time.sleep(0.25)
             injector.press_ctrl_v()
         else:
+            t1 = time.monotonic()
             injector.type_text_unicode(entry.text)
+            log(f"ввод: напечатано посимвольно за {time.monotonic() - t1:.2f} с")
 
         self.status.emit(f"Отправлено: {entry.title or entry.text[:32]}")
         self.used.emit(entry.id)

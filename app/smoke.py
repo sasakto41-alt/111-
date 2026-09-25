@@ -512,6 +512,146 @@ def run_smoke() -> int:
     except Exception as e:
         check(f"v3.5.0: {type(e).__name__}: {e}", False)
 
+    # 17. v3.6.0: последовательности макроса, широкое меню F7, анти-зависание
+    try:
+        from PySide6.QtCore import Qt as _Qt6
+        from PySide6.QtWidgets import QApplication
+
+        if QApplication.instance() is None:
+            QApplication([])
+
+        # --- новые поля настроек ---
+        s7 = models.Settings()
+        check("v3.6.0: поля gov_macro_steps/gov_macro_step_pause_ms существуют",
+              hasattr(s7, "gov_macro_steps") and hasattr(s7, "gov_macro_step_pause_ms"))
+        check("v3.6.0: по умолчанию один шаг step2 и пауза 4000 мс",
+              s7.gov_macro_steps == ["step2"] and s7.gov_macro_step_pause_ms == 4000)
+        s7.gov_macro_steps = ["step4", "мусор", "step2", "step2", "step1"]
+        s7.gov_macro_step_pause_ms = 999999
+        s7.normalize()
+        check("v3.6.0: normalize чистит шаги (неизвестные и дубли) и сохраняет порядок",
+              s7.gov_macro_steps == ["step4", "step2", "step1"])
+        check("v3.6.0: пауза между шагами зажата в 500..30000 мс",
+              s7.gov_macro_step_pause_ms == 30000)
+        s7b = models.Settings()
+        s7b.gov_macro_steps = []
+        s7b.gov_macro_action = "gnews_paleto"
+        s7b.normalize()
+        check("v3.6.0: пустые шаги → fallback на одиночное действие",
+              s7b.gov_macro_steps == ["gnews_paleto"])
+
+        # --- план последовательности ---
+        from app.ui.gov_wave import plan_macro_sequence
+
+        with tempfile.TemporaryDirectory() as td:
+            st = Store(path=Path(td) / "d.json")
+            st.settings.gov_last_slots = "15:00 15:20 15:40"
+            st.settings.gov_org = "LSCSD"
+            st.settings.gov_macro_steps = ["step1", "step2", "step4"]
+            plan = plan_macro_sequence(st.settings)
+            check("v3.6.0: план последовательности — 3 шага в заданном порядке",
+                  len(plan) == 3 and plan[0][0].startswith("1.")
+                  and plan[1][0].startswith("2.") and plan[2][0].startswith("4."))
+            check("v3.6.0: тексты шагов — /dep вопрос, /dep занять, /report",
+                  plan[0][1].startswith("/dep to All: Занята ли")
+                  and "занимает гос. волну" in plan[1][1]
+                  and plan[2][1].startswith("/report"))
+            st.settings.gov_macro_steps = []
+            plan1 = plan_macro_sequence(st.settings)
+            check("v3.6.0: пустые шаги → одиночный план из gov_macro_action",
+                  len(plan1) == 1)
+
+            # --- широкое меню F7 ---
+            from app.ui.gov_overlay import GovWaveOverlay, MacroConfirmDialog
+
+            st.settings.gov_macro_steps = ["step2"]
+            ov = GovWaveOverlay(st)
+            check("v3.6.0: меню F7 — широкий прямоугольник (1080x470)",
+                  ov.width() >= 1000 and ov.height() >= 440)
+            check("v3.6.0: меню F7 — минимум 880x430 (тянется в ширину)",
+                  ov.minimumWidth() >= 880 and ov.minimumHeight() >= 420)
+            check("v3.6.0: меню F7 — 7 широких команд в сетке",
+                  len(ov._cmd_buttons) == 7
+                  and all(b.minimumHeight() >= 52 for _, b in ov._cmd_buttons))
+            check("v3.6.0: меню F7 — всегда поверх (StaysOnTop)",
+                  bool(int(ov.windowFlags()) & _Qt6.WindowStaysOnTopHint))
+            check("v3.6.0: бейдж способа вставки читается из настроек",
+                  "Способ вставки" in ov.lbl_mode.text()
+                  and "Настроек" in ov.lbl_mode.text())
+            st.settings.inject_method = "copy"
+            ov._refresh()
+            check("v3.6.0: смена способа в Настройках подхватывается меню",
+                  "буфер" in ov.lbl_mode.text() or "скопирует" in ov.lbl_mode.text())
+            st.settings.inject_method = "unicode"
+            ov._refresh()
+            check("v3.6.0: режим «наборка текста» виден в меню (будет набирать)",
+                  "НАБЕРЁТ" in ov.lbl_mode.text() or "наберёт" in ov.lbl_mode.text())
+
+            # --- конструктор макроса в меню ---
+            check("v3.6.0: панель макроса со списком шагов присутствует",
+                  ov.lst_steps is not None and ov.sp_pause is not None)
+            check("v3.6.0: список шагов reflects настройки",
+                  ov.lst_steps.count() == 1 and "Занять" in ov.lst_steps.item(0).text())
+            st.settings.gov_macro_steps = ["step2", "step4"]
+            ov._refresh()
+            check("v3.6.0: меню показывает 2 шага из настроек", ov.lst_steps.count() == 2)
+            st.settings.gov_macro_steps = ["step2"]
+            ov._refresh()
+            ov.cb_add.setCurrentIndex(3)          # step4 — просьба принять
+            ov._step_add()
+            check("v3.6.0: «+ Добавить» в меню растит последовательность",
+                  ov.lst_steps.count() == 2 and st.settings.gov_macro_steps == ["step2", "step4"])
+            ov.lst_steps.setCurrentRow(1)
+            ov._step_up()
+            check("v3.6.0: «↑» переставляет шаги и сохраняет порядок",
+                  st.settings.gov_macro_steps == ["step4", "step2"])
+            ov._step_down()
+            check("v3.6.0: «↓» возвращает порядок",
+                  st.settings.gov_macro_steps == ["step2", "step4"])
+            ov.lst_steps.setCurrentRow(1)
+            ov._step_del()
+            check("v3.6.0: «✕ Удалить» убирает шаг",
+                  st.settings.gov_macro_steps == ["step2"] and ov.lst_steps.count() == 1)
+            st.settings.gov_macro_step_pause_ms = 6000
+            ov._refresh()
+            check("v3.6.0: пауза между шагами загружается из настроек",
+                  ov.sp_pause.value() == 6000)
+            ov._do_hide()
+
+            # --- подтверждение показывает последовательность ---
+            st.settings.gov_macro_steps = ["step2", "step4"]
+            st.settings.gov_macro_confirm_sec = 5
+            dlg = MacroConfirmDialog(st)
+            dlg.open_dialog()
+            check("v3.6.0: подтверждение показывает ОБА шага по порядку",
+                  "1) " in dlg.lbl_steps.text() and "2) " in dlg.lbl_steps.text()
+                  and "Занять" in dlg.lbl_steps.text() and "/report" in dlg.lbl_steps.text())
+            check("v3.6.0: подтверждение показывает выбранное время",
+                  "15:00" in dlg.lbl_slots.text() and "15:40" in dlg.lbl_slots.text())
+            check("v3.6.0: «Да» заблокирована на 5 с",
+                  not dlg.btn_yes.isEnabled() and dlg._remaining == 5)
+            for _ in range(5):
+                dlg._tick()
+            check("v3.6.0: после 5 тиков «Да» активна", dlg.btn_yes.isEnabled())
+            dlg._on_no()
+            check("v3.6.0: «Нет» закрывает подтверждение", not dlg.isVisible())
+
+            # --- анти-зависание: потокобезопасное скрытие и busy-guard ---
+            from app.sender import Sender as _Sender
+
+            snd = _Sender(lambda: models.Settings())
+            check("v3.6.0: Sender скрывает оверлеи через СИГНАЛ (не QTimer из потока)",
+                  hasattr(snd, "hide_overlays"))
+            check("v3.6.0: busy-guard SendWorker существует",
+                  hasattr(snd, "_busy"))
+            import inspect as _insp
+
+            src = _insp.getsource(_Sender.send_text)
+            check("v3.6.0: повторная отправка при занятости игнорируется",
+                  "_busy" in src and "пропущен" in src)
+    except Exception as e:
+        check(f"v3.6.0: {type(e).__name__}: {e}", False)
+
     return _finish()
 
 

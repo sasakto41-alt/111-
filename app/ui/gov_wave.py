@@ -21,7 +21,10 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QScrollArea, QTimeEdit, QVBoxLayout, QWidget,
 )
 
-from ..models import DISCORD_ANNOUNCE_URL, GNEWS_PALETO, GNEWS_SANDY
+from ..models import (
+    DISCORD_ANNOUNCE_URL, GOV_MACRO_ACTIONS, GOV_MACRO_LABELS,
+    GNEWS_PALETO, GNEWS_SANDY,
+)
 from .theme import DANGER, MUTED, OK
 from .widgets import SectionFrame
 
@@ -160,6 +163,27 @@ def resolve_macro_command(settings, action: str) -> str:
     if key is None:
         key = action if action in cmds else "2. Занять волну"
     return cmds.get(key, "")
+
+
+def plan_macro_sequence(settings) -> List[Tuple[str, str]]:
+    """Последовательность шагов макроса: [(подпись, команда), …] (v3.6.0).
+
+    Порядок задает settings.gov_macro_steps (собирается в меню F7).
+    Если список пуст или все шаги неизвестны — берётся одиночный шаг
+    settings.gov_macro_action (поведение v3.5.0). Пустые команды
+    (например, не заполнен шаблон /gnews) пропускаются.
+    """
+    steps = list(getattr(settings, "gov_macro_steps", []) or [])
+    if not any(st in GOV_MACRO_ACTIONS for st in steps):
+        steps = [getattr(settings, "gov_macro_action", "step2")]
+    out: List[Tuple[str, str]] = []
+    for st in steps:
+        if st not in GOV_MACRO_ACTIONS:
+            continue
+        text = resolve_macro_command(settings, st)
+        if text:
+            out.append((GOV_MACRO_LABELS.get(st, st), text))
+    return out
 
 
 # ------------------------------------------------------------------- UI --

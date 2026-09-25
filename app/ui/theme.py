@@ -63,6 +63,21 @@ QPushButton#navBtn {{ background: transparent; border: none; color: {MUTED};
   padding: 7px 14px; font-weight: 600; border-radius: 8px; }}
 QPushButton#navBtn:hover {{ color: {TEXT}; background: {PANEL_2}; }}
 QPushButton#navBtn:checked {{ color: white; background: {PRIMARY}; }}
+QPushButton#govCmd {{
+  background: {PANEL_2}; color: {TEXT}; border: 1px solid {BORDER};
+  border-radius: 10px; padding: 6px 10px; text-align: left;
+  font-weight: 600; font-size: 12px;
+}}
+QPushButton#govCmd:hover {{ border-color: {ACCENT}; background: #1B2A4A; }}
+QPushButton#govCmd:pressed {{ background: {PRIMARY}; }}
+
+QListWidget {{
+  background: {PANEL_2}; border: 1px solid {BORDER}; border-radius: 8px;
+  color: {TEXT}; font-size: 12px;
+}}
+QListWidget::item {{ padding: 4px 6px; border-radius: 5px; }}
+QListWidget::item:selected {{ background: {PRIMARY}; color: white; }}
+QListWidget::item:hover:!selected {{ background: #1B2A4A; }}
 
 QCheckBox {{ spacing: 8px; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {BORDER};

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 from typing import List, Optional
 
@@ -142,8 +143,30 @@ def find_target_window(title_contains: str = "", exe_contains: str = "") -> int:
 
 
 # ----------------------------------------------------------------- фокус --
+def _window_pid(hwnd) -> int:
+    """PID процесса-владельца окна (0 при ошибке/не Windows)."""
+    if not _is_windows or not hwnd:
+        return 0
+    try:
+        import ctypes.wintypes as wt
+
+        pid = wt.DWORD(0)
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value)
+    except Exception:
+        return 0
+
+
 def focus_window(hwnd: int) -> bool:
-    """Принудительно поднимает и фокусирует окно (AttachThreadInput + топмост)."""
+    """Принудительно поднимает и фокусирует окно (AttachThreadInput + топмост).
+
+    v3.6.0 (починка «всё зависает»): к потокам СОБСТВЕННОГО процесса
+    AttachThreadInput больше не применяется. Раньше рабочий поток отправки
+    мог прикрепить свой ввод к GUI-потоку программы (когда активным было
+    наше окно-оверлей) — взаимные блокировки этих потоков подвешивали
+    интерфейс. Если активное окно — наше, достаточно простого
+    SetForegroundWindow: разрешение на смену фокуса есть у самого процесса.
+    """
     if not _is_windows or not hwnd:
         return False
     try:
@@ -151,13 +174,16 @@ def focus_window(hwnd: int) -> bool:
             _user32.ShowWindow(hwnd, SW_RESTORE)
         fg = _user32.GetForegroundWindow()
         cur_tid = _kernel32.GetCurrentThreadId()
+        my_pid = os.getpid()
         fg_tid = _user32.GetWindowThreadProcessId(fg, None) if fg else 0
         target_tid = _user32.GetWindowThreadProcessId(hwnd, None)
+        fg_own = bool(fg) and _window_pid(fg) == my_pid
+        tgt_own = _window_pid(hwnd) == my_pid
         attached_fg = attached_target = False
         try:
-            if fg and fg_tid and fg_tid != cur_tid:
+            if fg and fg_tid and fg_tid != cur_tid and not fg_own:
                 attached_fg = bool(_user32.AttachThreadInput(cur_tid, fg_tid, True))
-            if target_tid and target_tid != cur_tid:
+            if target_tid and target_tid != cur_tid and not tgt_own:
                 attached_target = bool(_user32.AttachThreadInput(cur_tid, target_tid, True))
             ok = bool(_user32.SetForegroundWindow(hwnd))
         finally:

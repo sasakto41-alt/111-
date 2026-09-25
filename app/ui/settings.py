@@ -28,6 +28,10 @@ class SettingsPage(QWidget):
         self.store = store
         self._capture_target: str | None = None
         self._hotkeys = None
+        # v3.6.0: при массовом применении (кнопка «Сохранить настройки»)
+        # сигналы settings_changed подавляются и испускаются ОДИН раз —
+        # раньше каждое поле перезапускало хоткеи (join потоков) — UI «мерз»
+        self._suspend_emit = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -180,16 +184,23 @@ class SettingsPage(QWidget):
         self.cb_macro_action = QComboBox()
         for _a in GOV_MACRO_ACTIONS:
             self.cb_macro_action.addItem(GOV_MACRO_LABELS.get(_a, _a), _a)
-        form_m.addRow("Что отправляет макрос:", self.cb_macro_action)
+        form_m.addRow("Начальный шаг (если шаги не заданы):", self.cb_macro_action)
         self.sp_confirm = QSpinBox()
         self.sp_confirm.setRange(0, 30)
         self.sp_confirm.setSuffix(" с")
         form_m.addRow("Задержка кнопки «Да»:", self.sp_confirm)
+        self.sp_pause = QSpinBox()
+        self.sp_pause.setRange(500, 30000)
+        self.sp_pause.setSingleStep(500)
+        self.sp_pause.setSuffix(" мс")
+        form_m.addRow("Пауза между шагами макроса:", self.sp_pause)
         sec_govmenu.body_layout().addLayout(form_m)
         self.lbl_gov_hint = QLabel(
-            "Время берётся из раздела «Госволна» (или кнопкой «Подшитать время" 
-            "в её меню). После правки клавиш нажмите «💾 Сохранить настройки». "
-            "Клавиши не должны совпадать с F6 и между собой."
+            "Последовательность шагов макроса собирается ПРЯМО в меню Госволны "
+            "(F7): панель «Макрос» справа — добавляйте шаги и задавайте их "
+            "порядок. Время берётся из раздела «Госволна» или кнопкой "
+            "«Подшитать время» в её меню. После правки клавиш нажмите "
+            "«💾 Сохранить настройки». Клавиши не должны совпадать с F6 и между собой."
         )
         self.lbl_gov_hint.setObjectName("hint")
         self.lbl_gov_hint.setWordWrap(True)
@@ -267,6 +278,7 @@ class SettingsPage(QWidget):
         self.ed_macro.editingFinished.connect(self._apply_macro)
         self.cb_macro_action.currentIndexChanged.connect(self._apply_macro_misc)
         self.sp_confirm.valueChanged.connect(self._apply_macro_misc)
+        self.sp_pause.valueChanged.connect(self._apply_macro_misc)
 
         self._capture_timer = QTimer(self)
         self._capture_timer.timeout.connect(self._capture_tick)
@@ -299,9 +311,18 @@ class SettingsPage(QWidget):
             self.sp_confirm.setValue(int(getattr(s, "gov_macro_confirm_sec", 5)))
         except Exception:
             self.sp_confirm.setValue(5)
+        try:
+            self.sp_pause.setValue(int(getattr(s, "gov_macro_step_pause_ms", 4000)))
+        except Exception:
+            self.sp_pause.setValue(4000)
         self._load_tz()
 
     # ---------------------------------------------------------------- apply --
+    def _emit_changed(self) -> None:
+        """Испустить settings_changed, если не идёт массовое применение."""
+        if not self._suspend_emit:
+            self.settings_changed.emit()
+
     def _apply_keys(self) -> None:
         s = self.store.settings
         s.menu_hotkey = self.ed_menu.text().strip().lower() or "f6"
@@ -313,7 +334,7 @@ class SettingsPage(QWidget):
         if self.ed_type.text() != s.type_key:
             self.ed_type.setText(s.type_key)
         self.store.save()
-        self.settings_changed.emit()
+        self._emit_changed()
 
     def _apply_delay(self, val: int) -> None:
         self.store.settings.pre_delay_ms = int(val)
@@ -324,12 +345,12 @@ class SettingsPage(QWidget):
         self.store.settings.inject_method = m
         self.store.save()
         self._update_inject_hint()
-        self.settings_changed.emit()
+        self._emit_changed()
 
     def _apply_tray(self, on: bool) -> None:
         self.store.settings.tray_enabled = bool(on)
         self.store.save()
-        self.settings_changed.emit()
+        self._emit_changed()
 
     def _apply_wl(self, on: bool) -> None:
         self.store.settings.whitelist_enabled = bool(on)
@@ -341,11 +362,13 @@ class SettingsPage(QWidget):
         s.whitelist_titles = [t.strip() for t in self.txt_wl_title.toPlainText().splitlines() if t.strip()]
         self.store.save()
 
-    def _apply_target(self) -> None:
+    def _apply_target(self, count: bool = True) -> None:
         s = self.store.settings
         s.target_title = self.ed_target_title.text().strip()
         s.target_exe = self.ed_target_exe.text().strip()
         self.store.save()
+        if not count:
+            return
         if s.target_title:
             n = len(window_utils.find_windows(s.target_title, s.target_exe))
             self.lbl_target_status.setStyleSheet(f"color: {OK};")
@@ -367,7 +390,7 @@ class SettingsPage(QWidget):
         if self.ed_gov_menu.text() != s.gov_menu_hotkey.upper():
             self.ed_gov_menu.setText(s.gov_menu_hotkey.upper())
         self.store.save()
-        self.settings_changed.emit()
+        self._emit_changed()
 
     def _apply_macro(self, *_a) -> None:
         s = self.store.settings
@@ -377,7 +400,7 @@ class SettingsPage(QWidget):
         if self.ed_macro.text() != s.gov_macro_hotkey.upper():
             self.ed_macro.setText(s.gov_macro_hotkey.upper())
         self.store.save()
-        self.settings_changed.emit()
+        self._emit_changed()
 
     def _apply_macro_misc(self, *_a) -> None:
         s = self.store.settings
@@ -385,25 +408,35 @@ class SettingsPage(QWidget):
         if data:
             s.gov_macro_action = data
         s.gov_macro_confirm_sec = int(self.sp_confirm.value())
+        s.gov_macro_step_pause_ms = int(self.sp_pause.value())
         self.store.save()
-        self.settings_changed.emit()
+        self._emit_changed()
 
     # --------------------------------------------------- сохранение кнопкой --
     def _save_all(self) -> None:
-        """Кнопка «Сохранить настройки»: применить все поля и записать файл."""
+        """Кнопка «Сохранить настройки»: применить все поля и записать файл.
+
+        v3.6.0: применение без шторма перезапусков хоткеев (сигнал испускается
+        один раз) и без перечисления окон (EnumWindows мог подвешивать UI на
+        секунды) — поэтому раньше кнопка «зависала».
+        """
         try:
-            self._apply_keys()
-            self._apply_delay(self.sp_delay.value())
-            self._apply_inject()
-            self._apply_target()
-            self._apply_tz()
-            self._apply_gov_menu()
-            self._apply_macro()
-            self._apply_macro_misc()
-            self._apply_tray(self.chk_tray.isChecked())
-            self._apply_wl(self.chk_wl.isChecked())
-            self._apply_wl_text()
-            self.store.save()
+            self._suspend_emit = True
+            try:
+                self._apply_keys()
+                self._apply_delay(self.sp_delay.value())
+                self._apply_inject()
+                self._apply_target(count=False)
+                self._apply_tz()
+                self._apply_gov_menu()
+                self._apply_macro()
+                self._apply_macro_misc()
+                self._apply_tray(self.chk_tray.isChecked())
+                self._apply_wl(self.chk_wl.isChecked())
+                self._apply_wl_text()
+                self.store.save()
+            finally:
+                self._suspend_emit = False
             errs = self.store.settings.validate()
             if errs:
                 self.lbl_save.setStyleSheet(f"color: {DANGER};")

@@ -16,7 +16,7 @@ from ..config import APP_NAME
 from ..icons import app_icon
 from ..journal import log
 from ..models import (
-    CATEGORIES, GOV_MACRO_LABELS, TextEntry, normalize_hotkey,
+    CATEGORIES, TextEntry, normalize_hotkey,
 )
 from ..sender import SendWorker, Sender
 from .. import APP_VERSION
@@ -24,7 +24,7 @@ from .card import MIME_ENTRY, PhraseCard
 from .editor import TextEditorDialog
 from .flow_layout import FlowLayout
 from .gov_overlay import GovWaveOverlay, MacroConfirmDialog
-from .gov_wave import GovWavePage, resolve_macro_command
+from .gov_wave import GovWavePage, plan_macro_sequence
 from .settings import SettingsPage
 from .theme import build_qss
 from .widgets import SectionFrame, Toast
@@ -56,6 +56,9 @@ class MainWindow(QWidget):
         self._filter_cat = "Все"
         self._search = ""
         self._drag_pos = None
+        # v3.6.0: состояние последовательности макроса
+        self._seq: list = []
+        self._seq_i = 0
 
         self._build_ui()
         self.setStyleSheet(build_qss())
@@ -190,18 +193,23 @@ class MainWindow(QWidget):
             is_overlay_visible=lambda: (
                 self._shown_flag or self._gov_overlay._shown_flag
             ),
-            hide_overlay=self._hide_overlays_for_send,
         )
         self._thread = QThread(self)
         self._worker = SendWorker(self.sender)
         self._worker.moveToThread(self._thread)
         self._thread.start()
         self.sender.copy_requested.connect(self._on_copy_requested)
+        # v3.6.0: скрытие оверлеев из рабочего потока — только через сигнал
+        self.sender.hide_overlays.connect(self._hide_overlays_for_send)
         self.sender.status.connect(self.show_toast)
         self.sender.used.connect(self._on_used)
 
     def _hide_overlays_for_send(self) -> None:
-        """Скрыть оба оверлея перед отправкой (вызывается из рабочего потока)."""
+        """Скрыть оба оверлея перед отправкой.
+
+        v3.6.0: вызывается ТОЛЬКО в GUI-потоке — через сигнал Sender.hide_overlays
+        (Qt маршалирует его сюда из рабочего потока автоматически).
+        """
         if self._shown_flag:
             log("отправка фразы: скрываю оверлей")
             QTimer.singleShot(0, self._do_hide)
@@ -442,16 +450,44 @@ class MainWindow(QWidget):
             pass
 
     def _macro_confirmed(self) -> None:
-        s = self.store.settings
-        action = getattr(s, "gov_macro_action", "step2")
-        text = resolve_macro_command(s, action)
-        if not text:
-            self.show_toast("Команда макроса пустая — заполните её в разделе «Госволна»")
+        """«Да» в подтверждении: выполнить шаги макроса ПО ПОРЯДКУ (v3.6.0)."""
+        plan = plan_macro_sequence(self.store.settings)
+        if not plan:
+            self.show_toast("Макрос пустой — соберите шаги в меню Госволны (F7)")
             return
-        label = GOV_MACRO_LABELS.get(action, action)
+        try:
+            pause = int(getattr(self.store.settings, "gov_macro_step_pause_ms", 4000))
+        except Exception:
+            pause = 4000
+        self._seq = list(plan)
+        self._seq_i = 0
+        log(f"макрос: запуск последовательности из {len(self._seq)} шагов, пауза {pause} мс")
+        self._seq_step(pause)
+
+    def _seq_step(self, pause_ms: int) -> None:
+        """Отправить текущий шаг последовательности и запланировать следующий.
+
+        Шаги отправляются через рабочий поток (UI не блокируется); между
+        шагами пауза по таймеру GUI-потока — пользователь успевает нажать
+        Enter в игре (Enter программой не нажимается).
+        """
+        if self._seq_i >= len(self._seq):
+            log("макрос: последовательность завершена")
+            self.show_toast("✓ Макрос выполнен полностью")
+            return
+        n = len(self._seq)
+        title, text = self._seq[self._seq_i]
+        self.show_toast(f"Макрос — шаг {self._seq_i + 1}/{n}: {title}")
+        log(f"макрос: шаг {self._seq_i + 1}/{n} — {title}")
         self._worker.requested.emit(
-            TextEntry(title=f"[ГВ-макрос] {label}", text=text, category="Госволна")
+            TextEntry(
+                title=f"[ГВ-макрос {self._seq_i + 1}/{n}] {title}",
+                text=text, category="Госволна",
+            )
         )
+        self._seq_i += 1
+        if self._seq_i < len(self._seq):
+            QTimer.singleShot(max(500, pause_ms), lambda: self._seq_step(pause_ms))
 
     def apply_extra_hotkeys(self) -> None:
         """(Пере)запустить клавиши меню Госволны и макроса по настройкам."""
