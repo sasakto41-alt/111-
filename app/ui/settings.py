@@ -11,7 +11,10 @@ from PySide6.QtWidgets import (
 )
 
 from .. import window_utils
-from ..models import INJECT_HINTS, INJECT_LABELS, INJECT_METHODS, timezone_options
+from ..models import (
+    GOV_MACRO_ACTIONS, GOV_MACRO_LABELS, INJECT_HINTS, INJECT_LABELS,
+    INJECT_METHODS, timezone_options,
+)
 from .theme import DANGER, MUTED, OK
 from .widgets import SectionFrame
 
@@ -148,6 +151,51 @@ class SettingsPage(QWidget):
         sec_target.body_layout().addWidget(self.lbl_target_status)
         v.addWidget(sec_target)
 
+        # -------------------------- меню Госволны и макрос (v3.5.0) --
+        sec_govmenu = SectionFrame("Меню Госволны и макрос (отдельное окно)")
+        self.chk_gov_menu = QCheckBox("Включить отдельное меню Госволны (окно с командами)")
+        self.chk_gov_menu.setToolTip(
+            "Второе окно-оверлей: команды госволны одним кликом и кнопка "
+            "«Подшитать время» сверху. Открывается своей клавишей (по умолчанию F7)."
+        )
+        sec_govmenu.body_layout().addWidget(self.chk_gov_menu)
+        form_g = QFormLayout()
+        form_g.setSpacing(8)
+        self.ed_gov_menu = QLineEdit()
+        self.ed_gov_menu.setPlaceholderText("F7")
+        form_g.addRow("Клавиша меню Госволны (открыть/закрыть):", self.ed_gov_menu)
+        sec_govmenu.body_layout().addLayout(form_g)
+
+        self.chk_macro = QCheckBox("Включить макрос с подтверждением (время: Да / Нет)")
+        self.chk_macro.setToolTip(
+            "По своей комбинации клавиш открывается окно: выбранное время и команда. "
+            "Кнопка «Да» активируется через несколько секунд — защита от случайного нажатия."
+        )
+        sec_govmenu.body_layout().addWidget(self.chk_macro)
+        form_m = QFormLayout()
+        form_m.setSpacing(8)
+        self.ed_macro = QLineEdit()
+        self.ed_macro.setPlaceholderText("F8")
+        form_m.addRow("Комбинация клавиш макроса:", self.ed_macro)
+        self.cb_macro_action = QComboBox()
+        for _a in GOV_MACRO_ACTIONS:
+            self.cb_macro_action.addItem(GOV_MACRO_LABELS.get(_a, _a), _a)
+        form_m.addRow("Что отправляет макрос:", self.cb_macro_action)
+        self.sp_confirm = QSpinBox()
+        self.sp_confirm.setRange(0, 30)
+        self.sp_confirm.setSuffix(" с")
+        form_m.addRow("Задержка кнопки «Да»:", self.sp_confirm)
+        sec_govmenu.body_layout().addLayout(form_m)
+        self.lbl_gov_hint = QLabel(
+            "Время берётся из раздела «Госволна» (или кнопкой «Подшитать время" 
+            "в её меню). После правки клавиш нажмите «💾 Сохранить настройки». "
+            "Клавиши не должны совпадать с F6 и между собой."
+        )
+        self.lbl_gov_hint.setObjectName("hint")
+        self.lbl_gov_hint.setWordWrap(True)
+        sec_govmenu.body_layout().addWidget(self.lbl_gov_hint)
+        v.addWidget(sec_govmenu)
+
         # ---------------------------------------------------- часовой пояс --
         sec_tz = SectionFrame("Часовой пояс госволны")
         h_tz = QHBoxLayout()
@@ -213,6 +261,12 @@ class SettingsPage(QWidget):
         self.ed_target_title.editingFinished.connect(self._apply_target)
         self.ed_target_exe.editingFinished.connect(self._apply_target)
         self.cb_tz.currentIndexChanged.connect(self._apply_tz)
+        self.chk_gov_menu.toggled.connect(self._apply_gov_menu)
+        self.ed_gov_menu.editingFinished.connect(self._apply_gov_menu)
+        self.chk_macro.toggled.connect(self._apply_macro)
+        self.ed_macro.editingFinished.connect(self._apply_macro)
+        self.cb_macro_action.currentIndexChanged.connect(self._apply_macro_misc)
+        self.sp_confirm.valueChanged.connect(self._apply_macro_misc)
 
         self._capture_timer = QTimer(self)
         self._capture_timer.timeout.connect(self._capture_tick)
@@ -235,6 +289,16 @@ class SettingsPage(QWidget):
         self.txt_wl_title.setPlainText("\n".join(s.whitelist_titles))
         self.ed_target_title.setText(s.target_title)
         self.ed_target_exe.setText(s.target_exe)
+        self.chk_gov_menu.setChecked(bool(getattr(s, "gov_menu_enabled", False)))
+        self.ed_gov_menu.setText(getattr(s, "gov_menu_hotkey", "f7").upper())
+        self.chk_macro.setChecked(bool(getattr(s, "gov_macro_enabled", False)))
+        self.ed_macro.setText(getattr(s, "gov_macro_hotkey", "f8").upper())
+        idx_a = self.cb_macro_action.findData(getattr(s, "gov_macro_action", "step2"))
+        self.cb_macro_action.setCurrentIndex(idx_a if idx_a >= 0 else 1)
+        try:
+            self.sp_confirm.setValue(int(getattr(s, "gov_macro_confirm_sec", 5)))
+        except Exception:
+            self.sp_confirm.setValue(5)
         self._load_tz()
 
     # ---------------------------------------------------------------- apply --
@@ -294,6 +358,36 @@ class SettingsPage(QWidget):
         m = self.cb_inject.currentData() or "unicode"
         self.lbl_inject_hint.setText(INJECT_HINTS.get(m, ""))
 
+    # --------------------------------- меню Госволны и макрос (v3.5.0) --
+    def _apply_gov_menu(self, *_a) -> None:
+        s = self.store.settings
+        s.gov_menu_enabled = bool(self.chk_gov_menu.isChecked())
+        s.gov_menu_hotkey = self.ed_gov_menu.text().strip().lower() or "f7"
+        s.normalize()
+        if self.ed_gov_menu.text() != s.gov_menu_hotkey.upper():
+            self.ed_gov_menu.setText(s.gov_menu_hotkey.upper())
+        self.store.save()
+        self.settings_changed.emit()
+
+    def _apply_macro(self, *_a) -> None:
+        s = self.store.settings
+        s.gov_macro_enabled = bool(self.chk_macro.isChecked())
+        s.gov_macro_hotkey = self.ed_macro.text().strip().lower() or "f8"
+        s.normalize()
+        if self.ed_macro.text() != s.gov_macro_hotkey.upper():
+            self.ed_macro.setText(s.gov_macro_hotkey.upper())
+        self.store.save()
+        self.settings_changed.emit()
+
+    def _apply_macro_misc(self, *_a) -> None:
+        s = self.store.settings
+        data = self.cb_macro_action.currentData()
+        if data:
+            s.gov_macro_action = data
+        s.gov_macro_confirm_sec = int(self.sp_confirm.value())
+        self.store.save()
+        self.settings_changed.emit()
+
     # --------------------------------------------------- сохранение кнопкой --
     def _save_all(self) -> None:
         """Кнопка «Сохранить настройки»: применить все поля и записать файл."""
@@ -303,6 +397,9 @@ class SettingsPage(QWidget):
             self._apply_inject()
             self._apply_target()
             self._apply_tz()
+            self._apply_gov_menu()
+            self._apply_macro()
+            self._apply_macro_misc()
             self._apply_tray(self.chk_tray.isChecked())
             self._apply_wl(self.chk_wl.isChecked())
             self._apply_wl_text()

@@ -94,8 +94,48 @@ def ctypes_windll():
     return ctypes.windll.user32
 
 
+class _ComboPollThread(threading.Thread):
+    """Фоновый опрос одной комбинации клавиш (GetAsyncKeyState, Windows).
+
+    Используется для меню-клавиши, клавиши меню Госволны и макроса (v3.5.0):
+    опрос работает и в игре, и при запуске от администратора — в отличие от
+    низкоуровневых хуков.
+    """
+
+    def __init__(self, groups: list[tuple[int, ...]], on_fire: Callable[[], None],
+                 name: str = "MTH-combo"):
+        super().__init__(name=name, daemon=True)
+        self._groups = groups
+        self._on_fire = on_fire
+        self._stop_evt = threading.Event()
+        self._was = False
+        self._last = 0.0
+
+    def run(self) -> None:
+        while not self._stop_evt.wait(_POLL_SEC):
+            pressed = _combo_pressed(self._groups)
+            if not pressed:
+                self._was = False
+                continue
+            if self._was:
+                continue                       # удержание — уже сработали
+            self._was = True
+            if time.monotonic() - self._last < _DEBOUNCE:
+                continue
+            self._last = time.monotonic()
+            try:
+                self._on_fire()
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+
+
 class HotkeyManager(QObject):
     menu_toggled = Signal()
+    gov_toggled = Signal()         # v3.5.0: клавиша отдельного меню Госволны
+    macro_triggered = Signal()     # v3.5.0: клавиша макроса с подтверждением
     text_triggered = Signal(str)   # id фразы
     state_changed = Signal(str)
 
@@ -112,6 +152,14 @@ class HotkeyManager(QObject):
         self._was_pressed = False
         self._last_fire = 0.0
         self._test_cb: Optional[Callable[[], None]] = None
+        # v3.5.0: клавиши меню Госволны и макроса (опрос как у меню)
+        self._gov_hotkey = ""
+        self._gov_thread: Optional[_ComboPollThread] = None
+        self._gov_hook = None
+        self._macro_hotkey = ""
+        self._macro_thread: Optional[_ComboPollThread] = None
+        self._macro_hook = None
+        self._reserved: set[str] = set()
 
     # ------------------------------------------------------------------ api --
     def start(self, menu_hotkey: str) -> None:
@@ -132,12 +180,11 @@ class HotkeyManager(QObject):
         if sys.platform == "win32":
             # опрос GetAsyncKeyState — без хуков, надёжно в играх
             self._stop.clear()
-            self._was_pressed = False
-            self._last_fire = 0.0
-            self._thread = threading.Thread(
-                target=self._poll_loop, name="MTH-menu-key", daemon=True
+            self._thread = _ComboPollThread(
+                self._groups, self._on_menu, name="MTH-menu-key"
             )
             self._thread.start()
+            self._rebuild_reserved()
             log(
                 f"меню-клавиша {self._menu_hotkey.upper()}: запущен опрос "
                 f"GetAsyncKeyState (период {_POLL_SEC * 1000:.0f} мс)"
@@ -159,9 +206,121 @@ class HotkeyManager(QObject):
                 self.error = f"Не удалось зарегистрировать {self._menu_hotkey.upper()}: {e}"
                 log(f"ошибка регистрации меню-клавиши: {e}")
                 self.state_changed.emit("ошибка")
+            self._rebuild_reserved()
+
+    # --------------------------------------------- меню Госволны и макрос --
+    def start_gov(self, hotkey: str) -> None:
+        """(Пере)запустить опрос клавиши отдельного меню Госволны (v3.5.0)."""
+        self.stop_gov()
+        hk = normalize_hotkey(to_latin_key(hotkey or ""))
+        if not hk:
+            return
+        self._gov_hotkey = hk
+        self._rebuild_reserved()
+        groups = combo_groups(hk)
+        if not groups:
+            log(f"меню Госволны: непонятная клавиша «{hk}» — перехват не запущен")
+            return
+        if sys.platform == "win32":
+            self._gov_thread = _ComboPollThread(
+                groups, lambda: self._fire_extra(self.gov_toggled, hk),
+                name="MTH-gov-key",
+            )
+            self._gov_thread.start()
+            log(f"меню Госволны {hk.upper()}: запущен опрос GetAsyncKeyState")
+        elif keyboard is not None:
+            try:
+                self._gov_hook = keyboard.add_hotkey(
+                    hk, lambda: self._fire_extra(self.gov_toggled, hk),
+                    suppress=False, trigger_on_release=True,
+                )
+                log(f"меню Госволны {hk.upper()}: хук keyboard")
+            except Exception as e:
+                log(f"меню Госволны: ошибка регистрации: {e}")
+        self.state_changed.emit(f"госволна: {hk.upper()}")
+
+    def stop_gov(self) -> None:
+        t, self._gov_thread = self._gov_thread, None
+        if t is not None:
+            t.stop()
+            if t.is_alive():
+                t.join(timeout=0.8)
+        if self._gov_hook is not None:
+            try:
+                keyboard.remove_hotkey(self._gov_hook)
+            except Exception:
+                pass
+            self._gov_hook = None
+        if self._gov_hotkey:
+            self._gov_hotkey = ""
+            self._rebuild_reserved()
+
+    def start_macro(self, hotkey: str) -> None:
+        """(Пере)запустить опрос комбинации макроса (v3.5.0)."""
+        self.stop_macro()
+        hk = normalize_hotkey(to_latin_key(hotkey or ""))
+        if not hk:
+            return
+        self._macro_hotkey = hk
+        self._rebuild_reserved()
+        groups = combo_groups(hk)
+        if not groups:
+            log(f"макрос: непонятная комбинация «{hk}» — перехват не запущен")
+            return
+        if sys.platform == "win32":
+            self._macro_thread = _ComboPollThread(
+                groups, lambda: self._fire_extra(self.macro_triggered, hk),
+                name="MTH-macro-key",
+            )
+            self._macro_thread.start()
+            log(f"макрос {hk.upper()}: запущен опрос GetAsyncKeyState")
+        elif keyboard is not None:
+            try:
+                self._macro_hook = keyboard.add_hotkey(
+                    hk, lambda: self._fire_extra(self.macro_triggered, hk),
+                    suppress=False, trigger_on_release=True,
+                )
+                log(f"макрос {hk.upper()}: хук keyboard")
+            except Exception as e:
+                log(f"макрос: ошибка регистрации: {e}")
+        self.state_changed.emit(f"макрос: {hk.upper()}")
+
+    def stop_macro(self) -> None:
+        t, self._macro_thread = self._macro_thread, None
+        if t is not None:
+            t.stop()
+            if t.is_alive():
+                t.join(timeout=0.8)
+        if self._macro_hook is not None:
+            try:
+                keyboard.remove_hotkey(self._macro_hook)
+            except Exception:
+                pass
+            self._macro_hook = None
+        if self._macro_hotkey:
+            self._macro_hotkey = ""
+            self._rebuild_reserved()
+
+    def _fire_extra(self, sig, hk: str) -> None:
+        log(f"доп. клавиша: нажатие зафиксировано ({hk.upper()})")
+        try:
+            sig.emit()
+        except Exception as e:
+            log(f"доп. клавиша: ошибка сигнала: {e}")
+
+    def _rebuild_reserved(self) -> None:
+        """Клавиши, занятые меню/госволной/макросом — хоткеи фраз их не берут."""
+        r: set[str] = set()
+        if self._menu_hotkey:
+            r.add(self._menu_hotkey)
+        if self._gov_hotkey:
+            r.add(self._gov_hotkey)
+        if self._macro_hotkey:
+            r.add(self._macro_hotkey)
+        self._reserved = r
 
     def set_entries(self, entries: Iterable[TextEntry]) -> None:
-        """Перерегистрировать хоткеи фраз (пропускает конфликты с меню и дубли)."""
+        """Перерегистрировать хоткеи фраз (пропускает занятые клавиши и дубли)."""
         with self._lock:
             for h in self._entry_hooks:
                 try:
@@ -173,7 +332,7 @@ class HotkeyManager(QObject):
             if keyboard is not None:
                 for e in entries or []:
                     hk = normalize_hotkey(e.hotkey)
-                    if not hk or hk == self._menu_hotkey or hk in taken:
+                    if not hk or hk in self._reserved or hk in taken:
                         continue
                     try:
                         hook = keyboard.add_hotkey(
@@ -191,6 +350,8 @@ class HotkeyManager(QObject):
     def stop(self) -> None:
         with self._lock:
             self._stop_menu()
+            self.stop_gov()
+            self.stop_macro()
             for h in self._entry_hooks:
                 try:
                     keyboard.remove_hotkey(h)
@@ -218,25 +379,12 @@ class HotkeyManager(QObject):
         self._test_cb = None
 
     # ----------------------------------------------------------------- threads --
-    def _poll_loop(self) -> None:
-        while not self._stop.wait(_POLL_SEC):
-            pressed = _combo_pressed(self._groups)
-            if not pressed:
-                self._was_pressed = False
-                continue
-            if self._was_pressed:
-                continue                       # удержание — уже сработали
-            self._was_pressed = True
-            if time.monotonic() - self._last_fire < _DEBOUNCE:
-                continue
-            self._last_fire = time.monotonic()
-            self._on_menu()
-
     def _stop_menu(self) -> None:
-        self._stop.set()
         t = self._thread
-        if t is not None and t.is_alive():
-            t.join(timeout=0.8)
+        if t is not None:
+            t.stop()
+            if t.is_alive():
+                t.join(timeout=0.8)
         self._thread = None
         if self._menu_hook is not None:
             try:

@@ -379,6 +379,139 @@ def run_smoke() -> int:
     except Exception as e:
         check(f"v3.4.2: {type(e).__name__}: {e}", False)
 
+    # 16. v3.5.0: отдельное меню Госволны и макрос с подтверждением
+    try:
+        from datetime import datetime as _dt2
+
+        from PySide6.QtCore import Qt as _Qt5
+        from PySide6.QtWidgets import QApplication
+
+        if QApplication.instance() is None:
+            QApplication([])
+        check("models: GOV_MACRO_ACTIONS/LABELS заданы",
+              len(models.GOV_MACRO_ACTIONS) == 7
+              and models.GOV_MACRO_LABELS.get("step2") == "2. Занять волну")
+        s6 = models.Settings()
+        check("v3.5.0: поля меню/макроса существуют",
+              hasattr(s6, "gov_menu_enabled") and hasattr(s6, "gov_menu_hotkey")
+              and hasattr(s6, "gov_macro_enabled") and hasattr(s6, "gov_macro_hotkey")
+              and hasattr(s6, "gov_macro_action") and hasattr(s6, "gov_macro_confirm_sec"))
+        check("v3.5.0: значения по умолчанию (f7/f8, step2, 5 с, выключено)",
+              s6.gov_menu_hotkey == "f7" and s6.gov_macro_hotkey == "f8"
+              and s6.gov_macro_action == "step2" and s6.gov_macro_confirm_sec == 5
+              and s6.gov_menu_enabled is False and s6.gov_macro_enabled is False)
+        s6.gov_menu_hotkey = "е"          # кириллица → физическая клавиша
+        s6.gov_menu_enabled = True
+        s6.normalize()
+        check("v3.5.0: normalize переводит кириллицу клавиши меню Госволны",
+              s6.gov_menu_hotkey == "t" and s6.gov_menu_enabled is True)
+        s6b = models.Settings()
+        s6b.gov_menu_enabled = True
+        s6b.gov_menu_hotkey = "f6"
+        errs = s6b.validate()
+        check("v3.5.0: валидатор ловит совпадение с F6",
+              any("меню Госволны" in e for e in errs))
+        s6c = models.Settings()
+        s6c.gov_menu_enabled = True
+        s6c.gov_macro_enabled = True
+        s6c.gov_macro_hotkey = "f7"       # совпадает с меню Госволны по умолчанию
+        errs2 = s6c.validate()
+        check("v3.5.0: валидатор ловит совпадение макроса с меню Госволны",
+              any("макроса" in e for e in errs2))
+
+        from app.hotkeys import HotkeyManager as _HKM5
+        from app.ui.gov_wave import gov_slots_for, now_in_tz, resolve_macro_command
+
+        with tempfile.TemporaryDirectory() as td:
+            st = Store(path=Path(td) / "d.json")
+            st.settings.gov_last_slots = "15:00 15:20 15:40"
+            st.settings.gov_org = "LSCSD"
+            check("gov_slots_for: читает выбранные слоты",
+                  gov_slots_for(st.settings) == ["15:00", "15:20", "15:40"])
+            st.settings.gov_last_slots = ""
+            auto = gov_slots_for(st.settings)
+            check("gov_slots_for: пусто → подбор по памятке", len(auto) == 3)
+            t_now = now_in_tz(st.settings)
+            check("now_in_tz: авто ≈ текущее время",
+                  abs((t_now - _dt2.now()).total_seconds()) < 10)
+            st.settings.gov_tz_auto = False
+            st.settings.gov_utc_offset = 5.0
+            t_off = now_in_tz(st.settings)
+            check("now_in_tz: ручной пояс UTC+5",
+                  abs((t_off - _dt2.now()).total_seconds() - 5 * 3600) < 15)
+            st.settings.gov_tz_auto = True
+            cmd2 = resolve_macro_command(st.settings, "step2")
+            check("resolve_macro_command: команда занятия с фракцией и слотами",
+                  cmd2.startswith("/dep to All: Фракция LSCSD занимает гос. волну на "))
+            cmd_p = resolve_macro_command(st.settings, "gnews_paleto")
+            check("resolve_macro_command: /gnews Палето", cmd_p.startswith("/gnews"))
+
+            from app.ui.gov_overlay import GovWaveOverlay, MacroConfirmDialog
+
+            ov = GovWaveOverlay(st)
+            check("оверлей Госволны строится", ov is not None)
+            check("оверлей Госволны: 7 команд на кнопках", len(ov._cmd_buttons) == 7)
+            check("оверлей Госволны: всегда поверх (WindowStaysOnTopHint)",
+                  bool(int(ov.windowFlags()) & _Qt5.WindowStaysOnTopHint))
+            check("оверлей Госволны: кнопка «Подшитать время» есть",
+                  callable(ov.btn_time.click) and callable(ov._reslot))
+            ov.show_overlay()
+            check("оверлей Госволны: show включает флаг",
+                  ov._shown_flag and ov.isVisible())
+            ov.toggle()
+            check("оверлей Госволны: toggle закрывает окно",
+                  not ov._shown_flag and not ov.isVisible())
+            ov.toggle()
+            check("оверлей Госволны: toggle снова открывает", ov._shown_flag)
+            st.settings.gov_last_slots = ""
+            ov._reslot()
+            check("оверлей Госволны: «Подшитать время» пересчитал и сохранил слоты",
+                  len(st.settings.gov_last_slots.split()) == 3)
+            ov._do_hide()
+            check("оверлей Госволны: _do_hide сбрасывает флаг",
+                  not ov._shown_flag and not ov.isVisible())
+
+            dlg = MacroConfirmDialog(st)
+            st.settings.gov_macro_confirm_sec = 5
+            st.settings.gov_macro_action = "step2"
+            st.settings.gov_last_slots = "15:00 15:20 15:40"
+            dlg.open_dialog()
+            check("макрос: окно открылось, «Да» заблокирована (5 с)",
+                  dlg.isVisible() and not dlg.btn_yes.isEnabled())
+            check("макрос: время показано как выбранное в настройках",
+                  "15:00" in dlg.lbl_slots.text() and "15:40" in dlg.lbl_slots.text())
+            for _ in range(5):
+                dlg._tick()
+            check("макрос: после 5 тиков «Да» активна",
+                  dlg.btn_yes.isEnabled() and dlg._remaining == 0)
+            yes_fired = []
+            dlg.confirmed.connect(lambda: yes_fired.append(True))
+            dlg._on_yes()
+            check("макрос: «Да» испускает confirmed и закрывает окно",
+                  bool(yes_fired) and not dlg.isVisible())
+            dlg2 = MacroConfirmDialog(st)
+            st.settings.gov_macro_confirm_sec = 0
+            dlg2.open_dialog()
+            check("макрос: задержка 0 → «Да» активна сразу",
+                  dlg2.btn_yes.isEnabled())
+            dlg2._on_no()
+            check("макрос: «Нет» закрывает окно", not dlg2.isVisible())
+
+            hm5 = _HKM5()
+            hm5.start("f6")
+            hm5.start_gov("f7")
+            hm5.start_macro("f8")
+            check("v3.5.0: gov/macro клавиши стартуют, резерв заполнен",
+                  hm5._gov_hotkey == "f7" and hm5._macro_hotkey == "f8"
+                  and "f7" in hm5._reserved and "f8" in hm5._reserved)
+            hm5.stop_gov()
+            hm5.stop_macro()
+            check("v3.5.0: stop_gov/stop_macro снимают резерв",
+                  "f7" not in hm5._reserved and "f8" not in hm5._reserved)
+            hm5.stop()
+    except Exception as e:
+        check(f"v3.5.0: {type(e).__name__}: {e}", False)
+
     return _finish()
 
 

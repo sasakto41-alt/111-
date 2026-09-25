@@ -157,6 +157,21 @@ def timezone_options() -> List[Tuple[float, str]]:
     return opts
 
 
+# --- ключи действий макроса госволны (v3.5.0) ---
+GOV_MACRO_ACTIONS = (
+    "step1", "step2", "step3", "step4", "step5", "gnews_paleto", "gnews_sandy",
+)
+GOV_MACRO_LABELS = {
+    "step1": "1. Узнать занятость",
+    "step2": "2. Занять волну",
+    "step3": "3. Занял гос.волну (подтвердить)",
+    "step4": "4. Просьба принять (/report)",
+    "step5": "5. Освободить волну",
+    "gnews_paleto": "Объявление /gnews: Палето-Бэй",
+    "gnews_sandy": "Объявление /gnews: Сенди-Шорс",
+}
+
+
 @dataclass
 class Settings:
     menu_hotkey: str = "f6"
@@ -177,6 +192,13 @@ class Settings:
     gov_gnews_sandy: str = ""
     gov_tz_auto: bool = True      # True — время компьютера; False — ручной пояс
     gov_utc_offset: float = 0.0   # UTC±X, когда gov_tz_auto=False
+    # --- отдельное меню Госволны и макрос (v3.5.0) ---
+    gov_menu_enabled: bool = False     # отдельное окно с командами госволны
+    gov_menu_hotkey: str = "f7"        # его клавиша открыть/закрыть
+    gov_macro_enabled: bool = False    # макрос с окном подтверждения
+    gov_macro_hotkey: str = "f8"       # комбинация клавиш макроса
+    gov_macro_action: str = "step2"    # какая команда отправляется
+    gov_macro_confirm_sec: int = 5     # задержка кнопки «Да»
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -211,6 +233,18 @@ class Settings:
             self.gov_utc_offset = 0.0
         self.gov_utc_offset = max(-12.0, min(14.0, self.gov_utc_offset))
         self.gov_tz_auto = bool(self.gov_tz_auto)
+        # v3.5.0: отдельное меню Госволны и макрос
+        self.gov_menu_enabled = bool(self.gov_menu_enabled)
+        self.gov_macro_enabled = bool(self.gov_macro_enabled)
+        self.gov_menu_hotkey = normalize_hotkey(to_latin_key(self.gov_menu_hotkey)) or "f7"
+        self.gov_macro_hotkey = normalize_hotkey(to_latin_key(self.gov_macro_hotkey)) or "f8"
+        if self.gov_macro_action not in GOV_MACRO_ACTIONS:
+            self.gov_macro_action = "step2"
+        try:
+            self.gov_macro_confirm_sec = int(self.gov_macro_confirm_sec)
+        except Exception:
+            self.gov_macro_confirm_sec = 5
+        self.gov_macro_confirm_sec = max(0, min(30, self.gov_macro_confirm_sec))
 
     def validate(self) -> List[str]:
         errs: List[str] = []
@@ -220,4 +254,19 @@ class Settings:
             errs.append("клавиша чата некорректна (одна буква/цифра или F-клавиша)")
         if self.inject_method not in INJECT_METHODS:
             errs.append("неизвестный способ вставки")
+        # v3.5.0: клавиши отдельного меню Госволны и макроса не должны конфликтовать
+        if self.gov_menu_enabled:
+            if not is_valid_hotkey(self.gov_menu_hotkey):
+                errs.append("клавиша меню Госволны некорректна (F1–F24 или ctrl/alt/shift+клавиша)")
+            elif normalize_hotkey(self.gov_menu_hotkey) == normalize_hotkey(self.menu_hotkey):
+                errs.append("клавиша меню Госволны совпадает с клавишей основного меню")
+        if self.gov_macro_enabled:
+            if not is_valid_hotkey(self.gov_macro_hotkey):
+                errs.append("клавиша макроса некорректна (F1–F24 или ctrl/alt/shift+клавиша)")
+            else:
+                _mk = normalize_hotkey(self.gov_macro_hotkey)
+                if _mk == normalize_hotkey(self.menu_hotkey):
+                    errs.append("клавиша макроса совпадает с клавишей основного меню")
+                elif self.gov_menu_enabled and _mk == normalize_hotkey(self.gov_menu_hotkey):
+                    errs.append("клавиша макроса совпадает с клавишей меню Госволны")
         return errs

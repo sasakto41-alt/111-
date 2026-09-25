@@ -15,13 +15,16 @@ from .. import window_utils
 from ..config import APP_NAME
 from ..icons import app_icon
 from ..journal import log
-from ..models import CATEGORIES, TextEntry
+from ..models import (
+    CATEGORIES, GOV_MACRO_LABELS, TextEntry, normalize_hotkey,
+)
 from ..sender import SendWorker, Sender
 from .. import APP_VERSION
 from .card import MIME_ENTRY, PhraseCard
 from .editor import TextEditorDialog
 from .flow_layout import FlowLayout
-from .gov_wave import GovWavePage
+from .gov_overlay import GovWaveOverlay, MacroConfirmDialog
+from .gov_wave import GovWavePage, resolve_macro_command
 from .settings import SettingsPage
 from .theme import build_qss
 from .widgets import SectionFrame, Toast
@@ -127,6 +130,13 @@ class MainWindow(QWidget):
         self.stack.addWidget(self._settings_page)
         self.switch_page(PAGE_LIBRARY)
 
+        # --- отдельное меню Госволны и окно макроса (v3.5.0) ---
+        self._gov_overlay = GovWaveOverlay(self.store)
+        self._gov_overlay.trigger_command.connect(self._send_gov_text)
+        self._gov_overlay.slots_updated.connect(self._on_gov_slots_updated)
+        self._macro_dialog = MacroConfirmDialog(self.store)
+        self._macro_dialog.confirmed.connect(self._macro_confirmed)
+
         self.toast = Toast(self)
 
     def _build_library_page(self) -> QWidget:
@@ -173,9 +183,14 @@ class MainWindow(QWidget):
     def _build_sender(self) -> None:
         self.sender = Sender(
             settings_getter=lambda: self.store.settings,
-            get_prev_foreground=lambda: self._prev_hwnd,
-            is_overlay_visible=lambda: self._shown_flag,
-            hide_overlay=self.hide_overlay_from_sender,
+            get_prev_foreground=lambda: (
+                self._prev_hwnd if self._shown_flag
+                else (self._gov_overlay._prev_hwnd if self._gov_overlay._shown_flag else 0)
+            ),
+            is_overlay_visible=lambda: (
+                self._shown_flag or self._gov_overlay._shown_flag
+            ),
+            hide_overlay=self._hide_overlays_for_send,
         )
         self._thread = QThread(self)
         self._worker = SendWorker(self.sender)
@@ -184,6 +199,15 @@ class MainWindow(QWidget):
         self.sender.copy_requested.connect(self._on_copy_requested)
         self.sender.status.connect(self.show_toast)
         self.sender.used.connect(self._on_used)
+
+    def _hide_overlays_for_send(self) -> None:
+        """Скрыть оба оверлея перед отправкой (вызывается из рабочего потока)."""
+        if self._shown_flag:
+            log("отправка фразы: скрываю оверлей")
+            QTimer.singleShot(0, self._do_hide)
+        if self._gov_overlay._shown_flag:
+            log("отправка фразы: скрываю меню Госволны")
+            QTimer.singleShot(0, self._gov_overlay._do_hide)
 
     # ----------------------------------------------------- library фильтры --
     def _on_search(self, text: str) -> None:
@@ -389,6 +413,70 @@ class MainWindow(QWidget):
         log("отправка фразы: скрываю оверлей")
         QTimer.singleShot(0, self._do_hide)
 
+    # ---------------------------------- меню Госволны и макрос (v3.5.0) --
+    def toggle_gov_overlay(self) -> None:
+        s = self.store.settings
+        if not getattr(s, "gov_menu_enabled", False):
+            log("Госволна: клавиша нажата, но меню выключено в настройках")
+            self.show_toast("Меню Госволны выключено — включите его в Настройках")
+            return
+        self._gov_overlay.toggle()
+
+    def show_macro_confirm(self) -> None:
+        s = self.store.settings
+        if not getattr(s, "gov_macro_enabled", False):
+            log("макрос: клавиша нажата, но макрос выключен в настройках")
+            self.show_toast("Макрос Госволны выключен — включите его в Настройках")
+            return
+        self._macro_dialog.open_dialog()
+
+    def _send_gov_text(self, title: str, text: str) -> None:
+        self._worker.requested.emit(
+            TextEntry(title=title, text=text, category="Госволна")
+        )
+
+    def _on_gov_slots_updated(self) -> None:
+        try:
+            self._gov_page.refresh_settings()
+        except Exception:
+            pass
+
+    def _macro_confirmed(self) -> None:
+        s = self.store.settings
+        action = getattr(s, "gov_macro_action", "step2")
+        text = resolve_macro_command(s, action)
+        if not text:
+            self.show_toast("Команда макроса пустая — заполните её в разделе «Госволна»")
+            return
+        label = GOV_MACRO_LABELS.get(action, action)
+        self._worker.requested.emit(
+            TextEntry(title=f"[ГВ-макрос] {label}", text=text, category="Госволна")
+        )
+
+    def apply_extra_hotkeys(self) -> None:
+        """(Пере)запустить клавиши меню Госволны и макроса по настройкам."""
+        s = self.store.settings
+        try:
+            menu_hk = normalize_hotkey(s.menu_hotkey)
+            if s.gov_menu_enabled and s.gov_menu_hotkey and s.gov_menu_hotkey != menu_hk:
+                self.hotkeys.start_gov(s.gov_menu_hotkey)
+            else:
+                self.hotkeys.stop_gov()
+            gov_hk = normalize_hotkey(getattr(s, "gov_menu_hotkey", "") or "")
+            macro_hk = normalize_hotkey(getattr(s, "gov_macro_hotkey", "") or "")
+            macro_ok = (
+                s.gov_macro_enabled and macro_hk
+                and macro_hk != menu_hk and (not gov_hk or macro_hk != gov_hk)
+            )
+            if macro_ok:
+                self.hotkeys.start_macro(s.gov_macro_hotkey)
+            else:
+                self.hotkeys.stop_macro()
+        except Exception as e:
+            log(f"доп. хоткеи: ошибка {e}")
+        if not getattr(s, "gov_menu_enabled", False) and self._gov_overlay._shown_flag:
+            self._gov_overlay._do_hide()
+
     # ------------------------------------------------------------- действия --
     def trigger_entry(self, entry_id: str) -> None:
         e = self.store.get(entry_id)
@@ -430,6 +518,7 @@ class MainWindow(QWidget):
     def _on_settings_changed(self) -> None:
         s = self.store.settings
         self.hotkeys.start(s.menu_hotkey)
+        self.apply_extra_hotkeys()
         self.hotkeys.set_entries(self.store.entries)
         try:
             self._gov_page.refresh_settings()

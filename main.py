@@ -193,7 +193,11 @@ def main() -> int:
 
         hotkeys.menu_toggled.connect(win.toggle_overlay)
         hotkeys.text_triggered.connect(win.on_text_hotkey)
+        # v3.5.0: клавиши отдельного меню Госволны и макроса
+        hotkeys.gov_toggled.connect(win.toggle_gov_overlay)
+        hotkeys.macro_triggered.connect(win.show_macro_confirm)
         hotkeys.start(store.settings.menu_hotkey)
+        win.apply_extra_hotkeys()
         hotkeys.set_entries(store.entries)
         log("шаг 7/7: хоткеи зарегистрированы")
 

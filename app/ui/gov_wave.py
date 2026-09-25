@@ -50,6 +50,17 @@ def _parse_hhmm(s: str) -> Optional[Tuple[int, int]]:
     return None
 
 
+def now_in_tz(settings) -> datetime:
+    """Текущее время в поясе, выбранном для госволны (settings.gov_tz_*)."""
+    if getattr(settings, "gov_tz_auto", True):
+        return datetime.now()
+    try:
+        off = float(getattr(settings, "gov_utc_offset", 0.0) or 0.0)
+    except Exception:
+        off = 0.0
+    return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=off)
+
+
 def suggest_slots(now: Optional[datetime] = None, count: int = 3) -> List[str]:
     """Ближайшие допустимые слоты: за 10–120 минут, шаг сетки 10 мин,
     между своими объявлениями ≥ 20 минут (как в примере 15:00 15:20 15:40)."""
@@ -110,6 +121,45 @@ def build_commands(org: str, slots: List[str]) -> List[Tuple[str, str]]:
         ("4. Просьба принять волну", "/report Примите, пожалуйста, гос волну"),
         ("5. Освободить волну", "/dep to All: Освободил гос. волну."),
     ]
+
+
+# ------------------------------------------- helpers для меню и макроса --
+def gov_slots_for(settings) -> List[str]:
+    """Слоты времени, выбранные пользователем (settings.gov_last_slots).
+
+    Если в сохранённом значении нет трёх корректных времён — подбираются
+    ближайшие допустимые по памятке (от времени в выбранном поясе).
+    """
+    raw = (getattr(settings, "gov_last_slots", "") or "").split()
+    slots = [x for x in raw if _parse_hhmm(x)]
+    if len(slots) != 3:
+        slots = suggest_slots(now_in_tz(settings))
+    return slots[:3]
+
+
+# ключи макроса → названия шагов из build_commands (v3.5.0)
+_MACRO_STEP_KEYS = {
+    "step1": "1. Узнать занятость",
+    "step2": "2. Занять волну",
+    "step3": "3. Подтвердить занятие",
+    "step4": "4. Просьба принять волну",
+    "step5": "5. Освободить волну",
+}
+
+
+def resolve_macro_command(settings, action: str) -> str:
+    """Текст команды для макроса по ключу действия (GOV_MACRO_ACTIONS)."""
+    org = (getattr(settings, "gov_org", "") or "LSCSD").strip() or "LSCSD"
+    slots = gov_slots_for(settings)
+    cmds = dict(build_commands(org, slots))
+    if action == "gnews_paleto":
+        return getattr(settings, "gov_gnews_paleto", "") or GNEWS_PALETO
+    if action == "gnews_sandy":
+        return getattr(settings, "gov_gnews_sandy", "") or GNEWS_SANDY
+    key = _MACRO_STEP_KEYS.get(action)
+    if key is None:
+        key = action if action in cmds else "2. Занять волну"
+    return cmds.get(key, "")
 
 
 # ------------------------------------------------------------------- UI --
@@ -289,14 +339,7 @@ class GovWavePage(QWidget):
     # ----------------------------------------------------------------- время --
     def _now(self) -> datetime:
         """Текущее время в выбранном поясе (или время компьютера)."""
-        s = self.store.settings
-        if getattr(s, "gov_tz_auto", True):
-            return datetime.now()
-        try:
-            off = float(getattr(s, "gov_utc_offset", 0.0) or 0.0)
-        except Exception:
-            off = 0.0
-        return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=off)
+        return now_in_tz(self.store.settings)
 
     def _load_settings(self) -> None:
         s = self.store.settings
