@@ -540,6 +540,19 @@ class GovWaveOverlay(QWidget):
         self._prev_hwnd = window_utils.get_foreground_hwnd()
         self._refresh()          # каждый раз читаем настройки главного окна
         self._tick_clock()
+        # v3.8.0: прозрачность и запомненная позиция меню
+        try:
+            op = max(30, min(100, int(getattr(self.store.settings, "overlay_opacity", 100))))
+            self.setWindowOpacity(op / 100.0)
+        except Exception:
+            pass
+        try:
+            s = self.store.settings
+            gx, gy = int(getattr(s, "gov_pos_x", -1)), int(getattr(s, "gov_pos_y", -1))
+            if gx != -1 and gy != -1:
+                self.move(gx, gy)
+        except Exception:
+            pass
         move_to_screen_of(self, self._prev_hwnd)
         if self.isMinimized():
             self.showNormal()
@@ -570,6 +583,14 @@ class GovWaveOverlay(QWidget):
             pass
 
     def _do_hide(self) -> None:
+        # v3.8.0: запомнить, куда пользователь перетащил меню Госволны
+        try:
+            if self.isVisible():
+                s = self.store.settings
+                s.gov_pos_x, s.gov_pos_y = self.x(), self.y()
+                self.store.save()
+        except Exception:
+            pass
         self._shown_flag = False
         self.hide()
         if self._prev_hwnd and sys.platform == "win32":

@@ -206,6 +206,16 @@ class Settings:
     gov_macro_press_enter: bool = True  # после шага макрос само жмёт Enter
     gov_notify_enabled: bool = True     # красное уведомление «скоро госволна»
     gov_notify_minutes: int = 3         # за сколько минут до слота предупреждать
+    # v3.8.0: живой таймер до госволны, звуки, вид оверлеев, перенос данных
+    gov_countdown_enabled: bool = True  # таймер «До Госволны: ММ:СС» поверх игры
+    gov_countdown_minutes: int = 15     # показывать таймер, когда до слота ≤ N минут
+    notify_sound: bool = True           # звук красного уведомления о госволне
+    macro_sound: bool = True            # звук, когда макрос выполнен полностью
+    overlay_opacity: int = 100          # непрозрачность оверлеев, 30..100 %
+    overlay_pos_x: int = -1             # запомненная позиция окна F6 (-1 = авто)
+    overlay_pos_y: int = -1
+    gov_pos_x: int = -1                 # запомненная позиция меню Госволны (F7)
+    gov_pos_y: int = -1
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -276,6 +286,28 @@ class Settings:
         except Exception:
             self.gov_notify_minutes = 3
         self.gov_notify_minutes = max(1, min(30, self.gov_notify_minutes))
+        # v3.8.0: таймер до госволны, звуки, прозрачность, позиции оверлеев
+        self.gov_countdown_enabled = bool(self.gov_countdown_enabled)
+        try:
+            self.gov_countdown_minutes = int(self.gov_countdown_minutes)
+        except Exception:
+            self.gov_countdown_minutes = 15
+        self.gov_countdown_minutes = max(5, min(60, self.gov_countdown_minutes))
+        self.notify_sound = bool(self.notify_sound)
+        self.macro_sound = bool(self.macro_sound)
+        try:
+            self.overlay_opacity = int(self.overlay_opacity)
+        except Exception:
+            self.overlay_opacity = 100
+        self.overlay_opacity = max(30, min(100, self.overlay_opacity))
+        for _attr in ("overlay_pos_x", "overlay_pos_y", "gov_pos_x", "gov_pos_y"):
+            try:
+                _v = int(getattr(self, _attr))
+            except Exception:
+                _v = -1
+            # -1 = авто-позиция; остальное — запомненные координаты
+            # (не ограничиваем: у вторых мониторов бывают отрицательные X/Y)
+            setattr(self, _attr, _v)
 
     def validate(self) -> List[str]:
         errs: List[str] = []

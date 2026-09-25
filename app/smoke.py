@@ -830,6 +830,165 @@ def run_smoke() -> int:
     except Exception as e:
         check(f"v3.7.0: {type(e).__name__}: {e}", False)
 
+    # ============================================= 19. v3.8.0: таймер/звук/вид/перенос --
+    try:
+        from datetime import datetime as _dt9, timedelta as _td9
+
+        from PySide6.QtCore import Qt as _Qt9
+
+        from app import porting as _porting
+        from app import sounds as _sounds
+        from app.storage import Store as _Store9
+        from app.ui.gov_countdown import GovCountdownBadge, format_left
+        from app.ui.gov_wave import now_in_tz as _now9
+        from app.ui.settings import SettingsPage as _SP9
+
+        check("v3.8.0: версия >= 3.8.0",
+              tuple(int(x) for x in _ver.split(".")) >= (3, 8, 0))
+
+        # --- формат времени таймера ---
+        check("v3.8.0: format_left(2.783 мин) == '02:47'", format_left(2.783) == "02:47")
+        check("v3.8.0: format_left(65 мин) == '1:05:00'", format_left(65.0) == "1:05:00")
+        check("v3.8.0: format_left(0) == '00:00'", format_left(0) == "00:00")
+        check("v3.8.0: format_left отрицательное → '00:00'", format_left(-5) == "00:00")
+
+        with tempfile.TemporaryDirectory() as td9:
+            st9 = _Store9(path=Path(td9) / "n.json")
+            s9 = st9.settings
+
+            # --- новые настройки: значения по умолчанию и normalize ---
+            check("v3.8.0: таймер вкл. по умолчанию, окно 15 мин",
+                  s9.gov_countdown_enabled is True and s9.gov_countdown_minutes == 15)
+            check("v3.8.0: звуки вкл. по умолчанию",
+                  s9.notify_sound is True and s9.macro_sound is True)
+            check("v3.8.0: прозрачность 100 %, позиция авто (-1)",
+                  s9.overlay_opacity == 100 and s9.overlay_pos_x == -1
+                  and s9.gov_pos_x == -1 and s9.gov_pos_y == -1)
+            s9.gov_countdown_minutes = 999
+            s9.overlay_opacity = 5
+            s9.overlay_pos_x = 1920
+            s9.overlay_pos_y = 1080
+            s9.normalize()
+            check("v3.8.0: normalize ограничивает таймер (60) и прозрачность (30)",
+                  s9.gov_countdown_minutes == 60 and s9.overlay_opacity == 30)
+            check("v3.8.0: запомненная позиция сохраняется как есть",
+                  s9.overlay_pos_x == 1920 and s9.overlay_pos_y == 1080)
+
+            # --- таймер до госволны ---
+            badge = GovCountdownBadge(lambda: st9.settings)
+            check("v3.8.0: таймер не забирает фокус и пропускает клики",
+                  badge.testAttribute(_Qt9.WA_ShowWithoutActivating)
+                  and badge.testAttribute(_Qt9.WA_TransparentForMouseEvents))
+            check("v3.8.0: таймер поверх всего (StaysOnTop)",
+                  bool(badge.windowFlags() & _Qt9.WindowStaysOnTopHint))
+
+            now9 = _now9(s9)
+            near = (now9 + _td9(minutes=2)).strftime("%H:%M")
+            s9.gov_last_slots = f"{near} 23:50"
+            badge._tick()
+            check("v3.8.0: таймер показывается, когда до слота ≤ N минут", badge.isVisible())
+            check("v3.8.0: на таймере формат ММ:СС",
+                  len(badge.lbl_time.text().split(":")) in (2, 3))
+            badge._tick()
+            check("v3.8.0: таймер не падает при повторном тике", badge.isVisible())
+
+            s9.gov_countdown_enabled = False
+            badge._tick()
+            check("v3.8.0: выключенный таймер скрывается", not badge.isVisible())
+            s9.gov_countdown_enabled = True
+            s9.gov_countdown_minutes = 15      # окно обратно 15 мин (normalize выше дал 60)
+
+            far = (now9 + _td9(minutes=40)).strftime("%H:%M")
+            s9.gov_last_slots = far
+            badge._tick()
+            check("v3.8.0: таймер скрывается, когда до слота далеко", not badge.isVisible())
+
+            # --- звуки ---
+            s9.notify_sound = False
+            check("v3.8.0: звук уведомления отключается настройкой",
+                  _sounds.play_gov_notify(s9) is False)
+            s9.notify_sound = True
+            check("v3.8.0: пинг уведомления возвращает bool без ошибок",
+                  isinstance(_sounds.play_gov_notify(s9), bool))
+            check("v3.8.0: пинг макроса возвращает bool без ошибок",
+                  isinstance(_sounds.play_macro_done(s9), bool))
+
+            # --- экспорт / импорт ---
+            st9.add("Тест фраза", "Текст тестовой фразы", "Общение")
+            st9.add("Вторая", "Ещё текст", "Госволна")
+            s9.gov_org = "LSPD"
+            backup = Path(td9) / "backup.json"
+            n_exp = _porting.export_to_file(st9, backup)
+            check("v3.8.0: экспорт вернул число фраз", n_exp == len(st9.entries))
+            check("v3.8.0: файл экспорта существует и читается",
+                  backup.exists() and json.loads(backup.read_text(encoding="utf-8"))["settings"])
+
+            other = _Store9(path=Path(td9) / "other.json")
+            other.add("Старая фраза", "которая заменится", "Разное")
+            n_imp, before_imp = _porting.import_from_file(other, backup)
+            check("v3.8.0: импорт заменил фразы",
+                  n_imp == len(st9.entries) and len(other.entries) == n_imp)
+            check("v3.8.0: импорт перенёс настройки (gov_org)", other.settings.gov_org == "LSPD")
+            check("v3.8.0: импорт перенёс поля v3.8.0",
+                  other.settings.gov_countdown_minutes == st9.settings.gov_countdown_minutes
+                  and other.settings.overlay_opacity == st9.settings.overlay_opacity)
+
+            bad = Path(td9) / "bad.json"
+            bad.write_text("{это не json", encoding="utf-8")
+            try:
+                _porting.import_from_file(other, bad)
+                ok_bad = False
+            except Exception:
+                ok_bad = True
+            check("v3.8.0: битый файл импорта не рушит программу", ok_bad)
+            check("v3.8.0: после битого импорта данные целы", len(other.entries) == n_imp)
+
+            # --- страница настроек ---
+            sp9 = _SP9(_Store9(path=Path(td9) / "s.json"))
+            check("v3.8.0: в Настройках есть галочка таймера",
+                  hasattr(sp9, "chk_countdown") and sp9.chk_countdown.isChecked())
+            check("v3.8.0: окно таймера по умолчанию 15 мин",
+                  hasattr(sp9, "sp_countdown_min") and sp9.sp_countdown_min.value() == 15)
+            check("v3.8.0: галочки звука на месте",
+                  hasattr(sp9, "chk_notify_sound") and hasattr(sp9, "chk_macro_sound")
+                  and sp9.chk_notify_sound.isChecked() and sp9.chk_macro_sound.isChecked())
+            check("v3.8.0: прозрачность оверлеев на месте (100 %)",
+                  hasattr(sp9, "sp_opacity") and sp9.sp_opacity.value() == 100)
+            check("v3.8.0: кнопки экспорта/импорта на месте",
+                  hasattr(sp9, "btn_export") and hasattr(sp9, "btn_import"))
+            sp9.sp_opacity.setValue(70)
+            sp9._apply_overlay_ui()
+            check("v3.8.0: прозрачность сохраняется в настройки",
+                  sp9.store.settings.overlay_opacity == 70)
+            sp9.chk_countdown.setChecked(False)
+            sp9.sp_countdown_min.setValue(30)
+            sp9._apply_gov_extra()
+            check("v3.8.0: таймер/окно сохраняются в настройки",
+                  sp9.store.settings.gov_countdown_enabled is False
+                  and sp9.store.settings.gov_countdown_minutes == 30)
+            sp9.chk_notify_sound.setChecked(False)
+            sp9._apply_gov_extra()
+            check("v3.8.0: звук уведомления сохраняется",
+                  sp9.store.settings.notify_sound is False)
+
+            # --- позиция и прозрачность меню F7 ---
+            ov9 = GovWaveOverlay(st9)
+            st9.settings.gov_pos_x = 111
+            st9.settings.gov_pos_y = 222
+            st9.settings.overlay_opacity = 60
+            ov9.show_overlay()
+            check("v3.8.0: меню F7 вернулось на запомненную позицию",
+                  ov9.x() == 111 and ov9.y() == 222)
+            check("v3.8.0: меню F7 применило прозрачность",
+                  abs(ov9.windowOpacity() - 0.60) < 0.01)
+            ov9.move(333, 444)
+            ov9._do_hide()
+            check("v3.8.0: позиция F7 запомнилась при закрытии",
+                  st9.settings.gov_pos_x == 333 and st9.settings.gov_pos_y == 444)
+            check("v3.8.0: меню F7 реально скрылось", not ov9.isVisible())
+    except Exception as e:
+        check(f"v3.8.0: {type(e).__name__}: {e}", False)
+
     return _finish()
 
 

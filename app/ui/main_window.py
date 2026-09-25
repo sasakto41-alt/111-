@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from .. import window_utils
+from .. import sounds, window_utils
 from ..config import APP_NAME
 from ..icons import app_icon
 from ..journal import log
@@ -23,6 +23,7 @@ from .. import APP_VERSION
 from .card import MIME_ENTRY, PhraseCard
 from .editor import TextEditorDialog
 from .flow_layout import FlowLayout
+from .gov_countdown import GovCountdownBadge
 from .gov_notify import GovNotifyToast
 from .gov_overlay import GovWaveOverlay, MacroConfirmDialog
 from .gov_wave import GovWavePage, gov_alert_state, now_in_tz, plan_macro_sequence
@@ -150,6 +151,10 @@ class MainWindow(QWidget):
         self._notify_timer.setInterval(5000)
         self._notify_timer.timeout.connect(self._check_gov_notify)
         self._notify_timer.start()
+
+        # --- живой таймер «До Госволны: ММ:СС» поверх игры (v3.8.0) ---
+        self._gov_countdown = GovCountdownBadge(lambda: self.store.settings)
+        self._apply_overlay_look()
 
     def _build_library_page(self) -> QWidget:
         page = QWidget()
@@ -321,6 +326,8 @@ class MainWindow(QWidget):
     def show_overlay(self) -> None:
         self._prev_hwnd = window_utils.get_foreground_hwnd()
         self.switch_page(PAGE_LIBRARY)
+        self._apply_overlay_look()
+        self._restore_saved_pos()
         self._ensure_on_screen_of(self._prev_hwnd)
         if self.isMinimized():
             self.showNormal()
@@ -412,7 +419,39 @@ class MainWindow(QWidget):
         except Exception as e:
             log(f"перемещение на монитор игры: ошибка {e}")
 
+    def _restore_saved_pos(self) -> bool:
+        """Вернуть окно туда, куда пользователь его перетащил (v3.8.0)."""
+        try:
+            s = self.store.settings
+            x, y = int(getattr(s, "overlay_pos_x", -1)), int(getattr(s, "overlay_pos_y", -1))
+        except Exception:
+            return False
+        if x == -1 or y == -1:
+            return False
+        self.move(x, y)
+        return True
+
+    def _apply_overlay_look(self) -> None:
+        """Прозрачность оверлеев F6 и Госволны из настроек (v3.8.0)."""
+        try:
+            op = max(30, min(100, int(getattr(self.store.settings, "overlay_opacity", 100))))
+        except Exception:
+            op = 100
+        try:
+            self.setWindowOpacity(op / 100.0)
+            self._gov_overlay.setWindowOpacity(op / 100.0)
+        except Exception:
+            pass
+
     def _do_hide(self) -> None:
+        # v3.8.0: запомнить, куда пользователь перетащил оверлей
+        try:
+            if self.isVisible():
+                s = self.store.settings
+                s.overlay_pos_x, s.overlay_pos_y = self.x(), self.y()
+                self.store.save()
+        except Exception:
+            pass
         self._shown_flag = False
         self.hide()
         self._restore_previous_focus()
@@ -485,6 +524,8 @@ class MainWindow(QWidget):
         """
         if self._seq_i >= len(self._seq):
             log("макрос: последовательность завершена")
+            # v3.8.0: звуковой пинг завершения (если включён в настройках)
+            sounds.play_macro_done(self.store.settings)
             self.show_toast("✓ Макрос выполнен полностью")
             return
         n = len(self._seq)
@@ -532,6 +573,8 @@ class MainWindow(QWidget):
                 target_title=getattr(s, "target_title", "") or "",
                 target_exe=getattr(s, "target_exe", "") or "",
             )
+            # v3.8.0: звуковой пинг уведомления (если включён в настройках)
+            sounds.play_gov_notify(s)
         except Exception as e:
             log(f"уведомление о госволне: ошибка {e}")
 
@@ -602,10 +645,12 @@ class MainWindow(QWidget):
         self.hotkeys.start(s.menu_hotkey)
         self.apply_extra_hotkeys()
         self.hotkeys.set_entries(self.store.entries)
+        self._apply_overlay_look()          # v3.8.0: прозрачность применилась сразу
         try:
             self._gov_page.refresh_settings()
         except Exception:
             pass
+        self._refresh_cards()               # v3.8.0: после импорта данных карточки обновляются
 
     # ---------------------------------------------------------------- misc --
     def eventFilter(self, obj, event) -> bool:  # noqa: N802

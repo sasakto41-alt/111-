@@ -142,6 +142,35 @@ def find_target_window(title_contains: str = "", exe_contains: str = "") -> int:
     return wins[0]["hwnd"] if wins else 0
 
 
+# ------------------------------------------------ окно игры (общие маркеры) --
+# Используются уведомлением о госволне, таймером до госволны и автопереходом
+# после копирования (v3.8.0: единая точка автопоиска вместо трёх копий).
+GAME_TITLE_MARKERS = ("majestic", "rage", "gta", "grand theft auto")
+GAME_EXE_MARKERS = ("majestic", "ragemp", "rage_mp", "rageplugin", "gta5", "gta")
+
+
+def find_game_window(target_title: str = "", target_exe: str = "") -> int:
+    """Найти окно игры: сначала по настройке «Окно игры», затем по маркерам."""
+    try:
+        t = (target_title or "").strip()
+        e = (target_exe or "").strip()
+        if t or e:
+            hwnd = find_target_window(t, e)
+            if hwnd:
+                return hwnd
+        for marker in GAME_TITLE_MARKERS:
+            hwnd = find_target_window(marker, "")
+            if hwnd:
+                return hwnd
+        for marker in GAME_EXE_MARKERS:
+            hwnd = find_target_window("", marker)
+            if hwnd:
+                return hwnd
+    except Exception:
+        pass
+    return 0
+
+
 # ----------------------------------------------------------------- фокус --
 def _window_pid(hwnd) -> int:
     """PID процесса-владельца окна (0 при ошибке/не Windows)."""

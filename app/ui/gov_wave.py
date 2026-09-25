@@ -202,7 +202,7 @@ def gov_alert_state(settings, now: Optional[datetime] = None,
             minutes_before = int(getattr(settings, "gov_notify_minutes", 3))
         except Exception:
             minutes_before = 3
-    minutes_before = max(1, min(30, int(minutes_before or 3)))
+    minutes_before = max(1, min(120, int(minutes_before or 3)))
     best: Optional[Tuple[str, float]] = None
     for s in gov_slots_for(settings):
         pm = _parse_hhmm(s)

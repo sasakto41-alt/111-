@@ -6,11 +6,12 @@ import sys
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 
-from .. import window_utils
+from .. import porting, window_utils
 from ..models import (
     GOV_MACRO_ACTIONS, GOV_MACRO_LABELS, INJECT_HINTS, INJECT_LABELS,
     INJECT_METHODS, timezone_options,
@@ -249,6 +250,91 @@ class SettingsPage(QWidget):
         sec_notify.body_layout().addWidget(self.lbl_notify_hint)
         v.addWidget(sec_notify)
 
+        # ------------------------------ таймер и звук госволны (v3.8.0) --
+        sec_cd = SectionFrame("Таймер и звук госволны")
+        self.chk_countdown = QCheckBox("Показывать живой таймер «До Госволны: ММ:СС» поверх игры")
+        self.chk_countdown.setToolTip(
+            "Маленькая панель в углу экрана игры: сколько осталось до "
+            "ближайшего слота, который подобрало приложение. Тикает каждую "
+            "секунду, не забирает фокус и пропускает клики (не мешает игре)."
+        )
+        sec_cd.body_layout().addWidget(self.chk_countdown)
+        form_cd = QFormLayout()
+        form_cd.setSpacing(8)
+        self.sp_countdown_min = QSpinBox()
+        self.sp_countdown_min.setRange(5, 60)
+        self.sp_countdown_min.setSuffix(" мин")
+        self.sp_countdown_min.setToolTip(
+            "Таймер появляется, когда до ближайшего будущего слота осталось "
+            "меньше этого времени, и исчезает, когда время наступает."
+        )
+        form_cd.addRow("Показывать таймер за:", self.sp_countdown_min)
+        sec_cd.body_layout().addLayout(form_cd)
+        self.chk_notify_sound = QCheckBox("Звук при красном уведомлении о госволне")
+        sec_cd.body_layout().addWidget(self.chk_notify_sound)
+        self.chk_macro_sound = QCheckBox("Звук, когда макрос выполнен полностью")
+        sec_cd.body_layout().addWidget(self.chk_macro_sound)
+        lbl_cd_hint = QLabel(
+            "Таймер и звук работают сами (опрос часов): таймер виден в углу "
+            "игры, когда до волны осталось меньше выбранного времени; звук "
+            "дублирует красное уведомление и завершение макроса."
+        )
+        lbl_cd_hint.setObjectName("hint")
+        lbl_cd_hint.setWordWrap(True)
+        sec_cd.body_layout().addWidget(lbl_cd_hint)
+        v.addWidget(sec_cd)
+
+        # -------------------------------------- вид оверлея (v3.8.0) --
+        sec_look = SectionFrame("Внешний вид оверлея")
+        form_o = QFormLayout()
+        form_o.setSpacing(8)
+        self.sp_opacity = QSpinBox()
+        self.sp_opacity.setRange(30, 100)
+        self.sp_opacity.setSuffix(" %")
+        self.sp_opacity.setToolTip(
+            "Непрозрачность окон-меню (F6 и Госволна). 100 % — обычные окна, "
+            "меньше — сквозь них видна игра."
+        )
+        form_o.addRow("Непрозрачность оверлеев:", self.sp_opacity)
+        sec_look.body_layout().addLayout(form_o)
+        lbl_look_hint = QLabel(
+            "Позиция запоминается автоматически: перетащите окно за верхнюю "
+            "полосу — в следующий раз оно откроется там же (и на том же "
+            "мониторе, где игра)."
+        )
+        lbl_look_hint.setObjectName("hint")
+        lbl_look_hint.setWordWrap(True)
+        sec_look.body_layout().addWidget(lbl_look_hint)
+        v.addWidget(sec_look)
+
+        # ------------------------------ экспорт и импорт (v3.8.0) --
+        sec_port = SectionFrame("Экспорт и импорт (перенос на другой ПК)")
+        h_port = QHBoxLayout()
+        self.btn_export = QPushButton("📤 Экспорт всего в JSON")
+        self.btn_export.setToolTip(
+            "Сохранить ВСЁ в один файл: фразы, хоткеи, госволну, макрос, "
+            "уведомления, таймер, звуки, вид"
+        )
+        self.btn_export.clicked.connect(self._export_all)
+        h_port.addWidget(self.btn_export)
+        self.btn_import = QPushButton("📥 Импорт из JSON")
+        self.btn_import.setToolTip(
+            "Заменить текущие фразы и настройки данными из файла экспорта"
+        )
+        self.btn_import.clicked.connect(self._import_all)
+        h_port.addWidget(self.btn_import)
+        h_port.addStretch(1)
+        sec_port.body_layout().addLayout(h_port)
+        self.lbl_port = QLabel(
+            "Экспорт сохраняет ВСЁ в один JSON-файл — перекиньте его на другой "
+            "ПК и нажмите «Импорт». Внимание: импорт ЗАМЕНЯЕТ текущие фразы "
+            "и настройки данными из файла."
+        )
+        self.lbl_port.setObjectName("hint")
+        self.lbl_port.setWordWrap(True)
+        sec_port.body_layout().addWidget(self.lbl_port)
+        v.addWidget(sec_port)
+
         # ---------------------------------------------------- часовой пояс --
         sec_tz = SectionFrame("Часовой пояс госволны")
         h_tz = QHBoxLayout()
@@ -324,6 +410,11 @@ class SettingsPage(QWidget):
         self.chk_enter.toggled.connect(self._apply_macro_misc)
         self.chk_notify.toggled.connect(self._apply_notify)
         self.sp_notify_min.valueChanged.connect(self._apply_notify)
+        self.chk_countdown.toggled.connect(self._apply_gov_extra)
+        self.sp_countdown_min.valueChanged.connect(self._apply_gov_extra)
+        self.chk_notify_sound.toggled.connect(self._apply_gov_extra)
+        self.chk_macro_sound.toggled.connect(self._apply_gov_extra)
+        self.sp_opacity.valueChanged.connect(self._apply_overlay_ui)
 
         self._capture_timer = QTimer(self)
         self._capture_timer.timeout.connect(self._capture_tick)
@@ -373,6 +464,18 @@ class SettingsPage(QWidget):
             self.sp_notify_min.setValue(int(getattr(s, "gov_notify_minutes", 3)))
         except Exception:
             self.sp_notify_min.setValue(3)
+        # v3.8.0: таймер, звуки, прозрачность
+        self.chk_countdown.setChecked(bool(getattr(s, "gov_countdown_enabled", True)))
+        try:
+            self.sp_countdown_min.setValue(int(getattr(s, "gov_countdown_minutes", 15)))
+        except Exception:
+            self.sp_countdown_min.setValue(15)
+        self.chk_notify_sound.setChecked(bool(getattr(s, "notify_sound", True)))
+        self.chk_macro_sound.setChecked(bool(getattr(s, "macro_sound", True)))
+        try:
+            self.sp_opacity.setValue(int(getattr(s, "overlay_opacity", 100)))
+        except Exception:
+            self.sp_opacity.setValue(100)
         self._load_tz()
 
     # ---------------------------------------------------------------- apply --
@@ -505,6 +608,63 @@ class SettingsPage(QWidget):
         s.normalize()
         self.store.save()
 
+    # ------------------------------- таймер/звук/вид/перенос (v3.8.0) --
+    def _apply_gov_extra(self, *_a) -> None:
+        if self._busy_loading():
+            return
+        s = self.store.settings
+        s.gov_countdown_enabled = bool(self.chk_countdown.isChecked())
+        s.gov_countdown_minutes = int(self.sp_countdown_min.value())
+        s.notify_sound = bool(self.chk_notify_sound.isChecked())
+        s.macro_sound = bool(self.chk_macro_sound.isChecked())
+        s.normalize()
+        self.store.save()
+        self._emit_changed()
+
+    def _apply_overlay_ui(self, *_a) -> None:
+        if self._busy_loading():
+            return
+        s = self.store.settings
+        s.overlay_opacity = int(self.sp_opacity.value())
+        s.normalize()
+        self.store.save()
+        self._emit_changed()
+
+    def _export_all(self) -> None:
+        """Экспорт ВСЕГО (фразы + настройки) в один JSON-файл."""
+        try:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Экспорт фраз и настроек", "majestic_helper_backup.json",
+                "JSON (*.json)",
+            )
+            if not path:
+                return
+            n = porting.export_to_file(self.store, path)
+            self.lbl_port.setStyleSheet(f"color: {OK};")
+            self.lbl_port.setText(f"✓ Экспортировано: {n} фраз и все настройки → {path}")
+        except Exception as e:
+            self.lbl_port.setStyleSheet(f"color: {DANGER};")
+            self.lbl_port.setText(f"Ошибка экспорта: {e}")
+
+    def _import_all(self) -> None:
+        """Импорт фраз и настроек из JSON-файла (с заменой текущих)."""
+        try:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Импорт фраз и настроек", "", "JSON (*.json)"
+            )
+            if not path:
+                return
+            n, before = porting.import_from_file(self.store, path)
+            self._load()                 # перечитать все поля из новых настроек
+            self.lbl_port.setStyleSheet(f"color: {OK};")
+            self.lbl_port.setText(
+                f"✓ Импортировано: {n} фраз (было {before}). Настройки заменены."
+            )
+            self.settings_changed.emit()
+        except Exception as e:
+            self.lbl_port.setStyleSheet(f"color: {DANGER};")
+            self.lbl_port.setText(f"Ошибка импорта: {e}")
+
     # --------------------------------------------------- сохранение кнопкой --
     def _save_all(self) -> None:
         """Кнопка «Сохранить настройки»: применить все поля и записать файл.
@@ -525,6 +685,8 @@ class SettingsPage(QWidget):
                 self._apply_macro()
                 self._apply_macro_misc()
                 self._apply_notify()
+                self._apply_gov_extra()
+                self._apply_overlay_ui()
                 self._apply_tray(self.chk_tray.isChecked())
                 self._apply_wl(self.chk_wl.isChecked())
                 self._apply_wl_text()
