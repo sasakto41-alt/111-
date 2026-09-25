@@ -874,7 +874,7 @@ def run_smoke() -> int:
             check("v3.8.0: запомненная позиция сохраняется как есть",
                   s9.overlay_pos_x == 1920 and s9.overlay_pos_y == 1080)
 
-            # --- таймер до госволны ---
+            # --- таймер до госволны (время заморожено для детерминизма) ---
             badge = GovCountdownBadge(lambda: st9.settings)
             check("v3.8.0: таймер не забирает фокус и пропускает клики",
                   badge.testAttribute(_Qt9.WA_ShowWithoutActivating)
@@ -882,26 +882,41 @@ def run_smoke() -> int:
             check("v3.8.0: таймер поверх всего (StaysOnTop)",
                   bool(badge.windowFlags() & _Qt9.WindowStaysOnTopHint))
 
-            now9 = _now9(s9)
-            near = (now9 + _td9(minutes=2)).strftime("%H:%M")
-            s9.gov_last_slots = f"{near} 23:50"
-            badge._tick()
-            check("v3.8.0: таймер показывается, когда до слота ≤ N минут", badge.isVisible())
-            check("v3.8.0: на таймере формат ММ:СС",
-                  len(badge.lbl_time.text().split(":")) in (2, 3))
-            badge._tick()
-            check("v3.8.0: таймер не падает при повторном тике", badge.isVisible())
+            import app.ui.gov_wave as _gwmod9
 
-            s9.gov_countdown_enabled = False
-            badge._tick()
-            check("v3.8.0: выключенный таймер скрывается", not badge.isVisible())
-            s9.gov_countdown_enabled = True
-            s9.gov_countdown_minutes = 15      # окно обратно 15 мин (normalize выше дал 60)
+            _real_now_fn9 = _gwmod9.now_in_tz
+            _fixed_now9 = _DT(2026, 6, 15, 14, 0, 0)
+            _gwmod9.now_in_tz = lambda s: _fixed_now9
+            try:
+                now9 = _fixed_now9
+                near = (now9 + _td9(minutes=2)).strftime("%H:%M")
+                mid = (now9 + _td9(minutes=40)).strftime("%H:%M")
+                # ровно 3 валидных слота — иначе gov_slots_for включит
+                # fallback подбора от текущего времени (плавающий тест)
+                s9.gov_last_slots = f"{near} {mid} 23:50"
+                badge._tick()
+                check("v3.8.0: таймер показывается, когда до слота ≤ N минут",
+                      badge.isVisible())
+                check("v3.8.0: на таймере формат ММ:СС",
+                      len(badge.lbl_time.text().split(":")) in (2, 3))
+                badge._tick()
+                check("v3.8.0: таймер не падает при повторном тике", badge.isVisible())
 
-            far = (now9 + _td9(minutes=40)).strftime("%H:%M")
-            s9.gov_last_slots = far
-            badge._tick()
-            check("v3.8.0: таймер скрывается, когда до слота далеко", not badge.isVisible())
+                s9.gov_countdown_enabled = False
+                badge._tick()
+                check("v3.8.0: выключенный таймер скрывается", not badge.isVisible())
+                s9.gov_countdown_enabled = True
+                s9.gov_countdown_minutes = 15   # окно обратно 15 мин (normalize выше дал 60)
+
+                far1 = (now9 + _td9(minutes=40)).strftime("%H:%M")
+                far2 = (now9 + _td9(minutes=90)).strftime("%H:%M")
+                far3 = (now9 + _td9(minutes=120)).strftime("%H:%M")
+                s9.gov_last_slots = f"{far1} {far2} {far3}"
+                badge._tick()
+                check("v3.8.0: таймер скрывается, когда до слота далеко",
+                      not badge.isVisible())
+            finally:
+                _gwmod9.now_in_tz = _real_now_fn9
 
             # --- звуки ---
             s9.notify_sound = False
@@ -988,6 +1003,76 @@ def run_smoke() -> int:
             check("v3.8.0: меню F7 реально скрылось", not ov9.isVisible())
     except Exception as e:
         check(f"v3.8.0: {type(e).__name__}: {e}", False)
+
+    # 20. v3.9.0: комплект рассылки сотрудникам (make_release.bat + шаблоны)
+    try:
+        import sys as _sys
+
+        from app import APP_VERSION as _ver9
+        from app import config as _cfg9
+
+        check("v3.9.0: версия >= 3.9.0",
+              tuple(int(x) for x in _ver9.split(".")) >= (3, 9, 0))
+
+        root9 = Path(_cfg9.__file__).resolve().parent.parent
+        mk9 = root9 / "make_release.bat"
+        check("v3.9.0: make_release.bat существует и не пуст",
+              mk9.exists() and mk9.stat().st_size > 500)
+        if mk9.exists():
+            mk_txt = mk9.read_text(encoding="utf-8", errors="replace")
+            check("v3.9.0: make_release.bat собирает majestic_helper.spec",
+                  "majestic_helper.spec" in mk_txt)
+            check("v3.9.0: make_release.bat пакует ZIP (Compress-Archive)",
+                  "Compress-Archive" in mk_txt and "APP_VERSION" in mk_txt)
+            check("v3.9.0: make_release.bat кладёт шаблоны в пакет",
+                  "release_templates" in mk_txt and "ПРОЧТИ_МЕНЯ.txt" in mk_txt)
+
+        inst9 = root9 / "release_templates" / "УСТАНОВИТЬ.bat"
+        check("v3.9.0: УСТАНОВИТЬ.bat существует и не пуст",
+              inst9.exists() and inst9.stat().st_size > 500)
+        if inst9.exists():
+            in_txt = inst9.read_text(encoding="utf-8", errors="replace")
+            check("v3.9.0: установщик ставит программу в LOCALAPPDATA",
+                  "MajesticTextHelper.exe" in in_txt and "LOCALAPPDATA" in in_txt)
+            check("v3.9.0: установщик создаёт ярлыки и не ломает обновление",
+                  "WScript.Shell" in in_txt and "taskkill" in in_txt
+                  and "Извлечь" in in_txt)
+
+        rm9 = root9 / "release_templates" / "ПРОЧТИ_МЕНЯ.txt"
+        check("v3.9.0: ПРОЧТИ_МЕНЯ.txt существует и не пуст",
+              rm9.exists() and rm9.stat().st_size > 500)
+        if rm9.exists():
+            rm_txt = rm9.read_text(encoding="utf-8", errors="replace")
+            check("v3.9.0: инструкция описывает распаковку и клавиши",
+                  "Извлечь" in rm_txt and "F6" in rm_txt and "F7" in rm_txt)
+            check("v3.9.0: инструкция объясняет, где error.log",
+                  "error.log" in rm_txt and "Windows защитила" in rm_txt)
+
+        # --- путь данных в собранном exe (frozen) ---
+        real_frozen = getattr(_sys, "frozen", False)
+        real_exe = _sys.executable
+        try:
+            with tempfile.TemporaryDirectory() as tdf9:
+                app_dir = Path(tdf9) / "App"
+                app_dir.mkdir(parents=True, exist_ok=True)
+                fake_exe = app_dir / "MajesticTextHelper.exe"
+                _sys.frozen = True
+                _sys.executable = str(fake_exe)
+                check("v3.9.0: в exe база данных = папка рядом с exe",
+                      _cfg9.get_base_dir() == app_dir.resolve())
+        finally:
+            if real_frozen:
+                _sys.frozen = True
+            else:
+                try:
+                    del _sys.frozen
+                except AttributeError:
+                    pass
+            _sys.executable = real_exe
+        check("v3.9.0: в исходниках база данных = корень проекта",
+              _cfg9.get_base_dir() == _cfg9._project_root())
+    except Exception as e:
+        check(f"v3.9.0: {type(e).__name__}: {e}", False)
 
     return _finish()
 
