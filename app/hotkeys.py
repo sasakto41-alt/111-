@@ -247,6 +247,9 @@ class HotkeyManager(QObject):
 
     # ---------------------------------------------------------------- internal --
     def _on_menu(self) -> None:
+        # каждый факт нажатия — в журнал: если пользователь скажет «F6 не
+        # работает в игре», по error.log будет видно, дошло ли нажатие
+        log(f"меню-клавиша: нажатие зафиксировано ({self._menu_hotkey.upper()})")
         cb = self._test_cb
         if cb is not None:
             try:
@@ -256,5 +259,5 @@ class HotkeyManager(QObject):
             return
         try:
             self.menu_toggled.emit()
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"меню-клавиша: ошибка сигнала toggle: {e}")

@@ -67,6 +67,21 @@ def get_window_title(hwnd) -> str:
         return ""
 
 
+def get_window_rect(hwnd: int) -> Optional[tuple]:
+    """(left, top, right, bottom) окна или None (вне Windows/ошибка)."""
+    if not _is_windows or not hwnd:
+        return None
+    try:
+        import ctypes.wintypes as wt
+
+        rc = wt.RECT()
+        if _user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+            return (int(rc.left), int(rc.top), int(rc.right), int(rc.bottom))
+    except Exception:
+        pass
+    return None
+
+
 # ------------------------------------------------------------- foreground --
 def get_foreground_hwnd() -> int:
     if not _is_windows:

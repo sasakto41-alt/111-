@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from .. import window_utils
 from ..config import APP_NAME
 from ..icons import app_icon
+from ..journal import log
 from ..models import CATEGORIES, TextEntry
 from ..sender import SendWorker, Sender
 from .. import APP_VERSION
@@ -37,7 +38,11 @@ class MainWindow(QWidget):
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         # Qt.Window (не Qt.Tool!): окно видно в панели задач — его нельзя
         # «потерять», если оно открылось за полноэкранной игрой.
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        # WindowStaysOnTopHint: оверлей обязан подниматься ПОВЕРХ безрамочной
+        # игры (v3.4.1 — было видно только на рабочем столе).
+        self.setWindowFlags(
+            Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+        )
         self.setWindowIcon(app_icon())
         self.resize(920, 580)
 
@@ -262,34 +267,115 @@ class MainWindow(QWidget):
         return self._prev_hwnd
 
     def toggle_overlay(self) -> None:
-        if self._shown_flag:
+        # v3.4.1: ИСТИНА, если либо флаг, либо окно реально видно.
+        # Раньше _shown_flag никогда не становился True, из-за чего повторное
+        # нажатие F6 снова вызывало show_overlay() — меню не закрывалось.
+        if self._shown_flag or self.isVisible():
+            log("F6: toggle — скрываю оверлей")
             self._do_hide()
         else:
+            log("F6: toggle — показываю оверлей")
             self.show_overlay()
 
     def show_overlay(self) -> None:
         self._prev_hwnd = window_utils.get_foreground_hwnd()
         self.switch_page(PAGE_LIBRARY)
+        self._ensure_on_screen_of(self._prev_hwnd)
+        if self.isMinimized():
+            self.showNormal()
         self.show()
         self.raise_()
         self.activateWindow()
-        self._force_topmost()
+        self._raise_over_everything()
+        self._shown_flag = True
+        self.ed_search.setFocus()
+        log(f"F6: оверлей показан (прежнее окно hwnd={self._prev_hwnd})")
+        # некоторые игры пере-поднимают своё окно через мгновение —
+        # повторяем подъём и проверяем результат (v3.4.1)
+        QTimer.singleShot(150, self._raise_over_everything)
+        QTimer.singleShot(500, self._check_foreground_after_show)
 
-    def _force_topmost(self) -> None:
+    def _raise_over_everything(self) -> None:
+        """Поднять окно ПОВЕРХ всего (включая безрамочную игру) и забрать фокус.
+
+        Просто raise_() недостаточно: в игре окно может остаться за игровым
+        окном. Используем TOPMOST + BringWindowToTop + AttachThreadInput.
+        """
+        if not self.isVisible():
+            return
         try:
-            hwnd = int(self.winId()) if sys.platform == "win32" else 0
-            if hwnd:
-                ctypes.windll.user32.SetWindowPos(
-                    hwnd, window_utils.HWND_TOPMOST, 0, 0, 0, 0,
-                    window_utils.SWP_NOMOVE | window_utils.SWP_NOSIZE
-                    | window_utils.SWP_SHOWWINDOW,
-                )
+            if sys.platform == "win32":
+                hwnd = int(self.winId())
+                if hwnd:
+                    ctypes.windll.user32.SetWindowPos(
+                        hwnd, window_utils.HWND_TOPMOST, 0, 0, 0, 0,
+                        window_utils.SWP_NOMOVE | window_utils.SWP_NOSIZE
+                        | window_utils.SWP_SHOWWINDOW,
+                    )
+                    ctypes.windll.user32.BringWindowToTop(hwnd)
+                    window_utils.focus_window(hwnd)
+            else:
+                self.raise_()
+                self.activateWindow()
+        except Exception as e:
+            log(f"подъём окна: ошибка {e}")
+
+    def _check_foreground_after_show(self) -> None:
+        """Через полсекунды проверить: окно действительно в фокусе?
+
+        Если нет — последняя попытка подъёма и запись в журнал (для диагноза
+        «в игре не открывается» по error.log).
+        """
+        try:
+            if not self.isVisible() or not self._shown_flag:
+                return
+            if sys.platform != "win32":
+                return
+            fg = window_utils.get_foreground_hwnd()
+            me = int(self.winId())
+            if fg == me:
+                log("F6: подтверждено — окно в фокусе, поверх игры")
+            else:
+                log(f"F6: внимание — фокус у другого окна (hwnd={fg}), повторный подъём")
+                self._raise_over_everything()
         except Exception:
             pass
 
+    def _ensure_on_screen_of(self, hwnd: int) -> None:
+        """Если окно сейчас не видно на мониторе, где окно игры — центрируем
+        его на этом мониторе (иначе в игре «не открывается» на другом экране)."""
+        try:
+            if sys.platform != "win32" or not hwnd:
+                return
+            rect = window_utils.get_window_rect(hwnd)
+            if not rect:
+                return
+            l, t, r, b = rect
+            from PySide6.QtCore import QRect
+
+            game_screen = None
+            for sc in QApplication.screens():
+                if sc.geometry().intersects(QRect(l, t, max(1, r - l), max(1, b - t))):
+                    game_screen = sc
+                    break
+            if game_screen is None:
+                return
+            if self.frameGeometry().intersects(game_screen.geometry()):
+                return            # окно уже видно на этом мониторе — не трогаем
+            gg = game_screen.geometry()
+            self.move(
+                gg.center().x() - self.width() // 2,
+                gg.center().y() - self.height() // 2,
+            )
+            log(f"F6: окно перемещено на монитор игры ({gg.x()},{gg.y()} {gg.width()}x{gg.height()})")
+        except Exception as e:
+            log(f"перемещение на монитор игры: ошибка {e}")
+
     def _do_hide(self) -> None:
+        self._shown_flag = False
         self.hide()
         self._restore_previous_focus()
+        log("F6/Escape: оверлей скрыт")
 
     def _restore_previous_focus(self) -> None:
         if self._prev_hwnd and sys.platform == "win32":
@@ -300,6 +386,7 @@ class MainWindow(QWidget):
 
     def hide_overlay_from_sender(self) -> None:
         """Вызывается из рабочего потока — маршируем в GUI-поток."""
+        log("отправка фразы: скрываю оверлей")
         QTimer.singleShot(0, self._do_hide)
 
     # ------------------------------------------------------------- действия --

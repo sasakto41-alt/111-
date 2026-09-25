@@ -275,6 +275,42 @@ def run_smoke() -> int:
     except Exception as e:
         check(f"настройки v3.4.0: {type(e).__name__}: {e}", False)
 
+    # 13. v3.4.1: toggle оверлея (F6 открывает И закрывает) и поверх игры
+    try:
+        from PySide6.QtCore import Qt as _Qt2
+
+        with tempfile.TemporaryDirectory() as td:
+            st = Store(path=Path(td) / "d.json")
+            win2 = MainWindow(st, HotkeyManager())
+            check("окно всегда поверх всего (WindowStaysOnTopHint)",
+                  bool(int(win2.windowFlags()) & _Qt2.WindowStaysOnTopHint))
+            check("до показа флаг оверлея False", not win2.is_overlay_visible())
+            win2.show_overlay()
+            check("show_overlay включает флаг", win2.is_overlay_visible())
+            check("окно видимо после show_overlay", win2.isVisible())
+            win2.toggle_overlay()
+            check("повторный toggle ЗАКРЫВАЕТ оверлей (главный баг v3.4.0)",
+                  not win2.is_overlay_visible())
+            check("окно скрыто после закрытия", not win2.isVisible())
+            win2.toggle_overlay()
+            check("toggle снова открывает", win2.is_overlay_visible() and win2.isVisible())
+            win2._do_hide()
+            check("_do_hide сбрасывает флаг", not win2.is_overlay_visible())
+            check("методы подъёма существуют",
+                  callable(win2._raise_over_everything)
+                  and callable(win2._check_foreground_after_show)
+                  and callable(win2._ensure_on_screen_of))
+            win2.hotkeys.stop()
+    except Exception as e:
+        check(f"toggle v3.4.1: {type(e).__name__}: {e}", False)
+
+    # 14. window_utils v3.4.1: get_window_rect безопасен вне Windows
+    try:
+        check("get_window_rect вне Windows возвращает None",
+              window_utils.get_window_rect(0) is None)
+    except Exception as e:
+        check(f"window_utils v3.4.1: {type(e).__name__}: {e}", False)
+
     return _finish()
 
 
