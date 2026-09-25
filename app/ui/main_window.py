@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from .. import window_utils
 from ..config import APP_NAME
+from ..icons import app_icon
 from ..models import CATEGORIES, TextEntry
 from ..sender import SendWorker, Sender
 from .. import APP_VERSION
@@ -34,7 +35,10 @@ class MainWindow(QWidget):
         self.hotkeys = hotkeys
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
-        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
+        # Qt.Window (не Qt.Tool!): окно видно в панели задач — его нельзя
+        # «потерять», если оно открылось за полноэкранной игрой.
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self.setWindowIcon(app_icon())
         self.resize(920, 580)
 
         self._prev_hwnd = 0

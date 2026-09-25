@@ -49,6 +49,12 @@ def run_smoke() -> int:
           hasattr(s, "gov_org") and hasattr(s, "gov_gnews_paleto") and hasattr(s, "gov_last_slots"))
     check("пояс: gov_tz_auto/gov_utc_offset существуют",
           hasattr(s, "gov_tz_auto") and hasattr(s, "gov_utc_offset"))
+    from app import APP_VERSION as _ver
+    try:
+        ver_ok = tuple(int(x) for x in _ver.split(".")) >= (3, 3, 0)
+    except Exception:
+        ver_ok = False
+    check("версия >= 3.3.0", ver_ok)
     s2 = models.Settings.from_dict({**s.to_dict(), "gov_org": "LSPD", "unknown_field": 1})
     check("Settings roundtrip + игнор неизвестных полей", s2.gov_org == "LSPD")
     s3 = models.Settings.from_dict({"gov_tz_auto": False, "gov_utc_offset": 3.0})
@@ -168,6 +174,11 @@ def run_smoke() -> int:
             win = MainWindow(st, hk)
             check("главное окно строится", win is not None)
             check("навигация: 3 страницы", win.stack.count() == 3)
+            from PySide6.QtCore import Qt as _Qt
+
+            check("окно в панели задач (Qt.Window)",
+                  bool(int(win.windowFlags()) & _Qt.Window))
+            check("у окна есть иконка", not win.windowIcon().isNull())
             # эмуляция: сохранение команд в библиотеку
             gw._save_to_library()
             gov_entries = [e for e in st.entries if e.category == "Госволна"]
@@ -187,6 +198,29 @@ def run_smoke() -> int:
         check("QApplication offscreen работает", app is not None)
     except Exception as e:
         check(f"UI: {type(e).__name__}: {e}", False)
+
+    # 10. Надёжный запуск v3.3.0: журнал + повторный запуск
+    try:
+        import main as _m
+
+        check("main: модуль запуска импортируется", callable(_m.main))
+        _m.log("smoke-проверка журнала")
+        check("main: журнал пишется на диск",
+              bool(_m.LOG_PATH) and Path(_m.LOG_PATH).exists())
+        check("main: show_box/fatal доступны",
+              callable(_m.show_box) and callable(_m._fatal) and _m._app_version() == _ver)
+        from PySide6.QtCore import QLockFile
+
+        import tempfile as _tf
+
+        lp = os.path.join(_tf.gettempdir(), "mth_smoke.lock")
+        l1 = QLockFile(lp)
+        check("QLockFile: первый захват", l1.tryLock(500))
+        l2 = QLockFile(lp)
+        check("QLockFile: второй экземпляр блокируется", not l2.tryLock(300))
+        l1.unlock()
+    except Exception as e:
+        check(f"запуск v3.3.0: {type(e).__name__}: {e}", False)
 
     return _finish()
 
