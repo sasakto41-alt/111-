@@ -1,6 +1,9 @@
 """Страница настроек: хоткеи, способ вставки, окно игры, трей, белый список."""
 from __future__ import annotations
 
+import os
+import sys
+
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -71,7 +74,12 @@ class SettingsPage(QWidget):
         self.sp_delay.setSuffix(" мс")
         form.addRow("Пауза после чата:", self.sp_delay)
         sec_keys.body_layout().addLayout(form)
-        self.lbl_keys_hint = QLabel("Пауза даёт игре время открыть чат. Enter никогда не нажимается.")
+        self.lbl_keys_hint = QLabel(
+            "Пауза даёт игре время открыть чат. Enter никогда не нажимается. "
+            "В Majestic RP чат открывает латинская T: если в поле была русская "
+            "буква — программа сама заменит её на ту же физическую клавишу "
+            "(е→T, ё→` и т.д.), но лучше введите «t» при раскладке EN."
+        )
         self.lbl_keys_hint.setObjectName("hint")
         self.lbl_keys_hint.setWordWrap(True)
         sec_keys.body_layout().addWidget(self.lbl_keys_hint)
@@ -207,8 +215,8 @@ class SettingsPage(QWidget):
         self.cb_tz.currentIndexChanged.connect(self._apply_tz)
 
         self._capture_timer = QTimer(self)
-        self._capture_timer.setSingleShot(True)
-        self._capture_timer.timeout.connect(self._do_capture)
+        self._capture_timer.timeout.connect(self._capture_tick)
+        self._capture_left = 0
 
         self._load()
 
@@ -235,6 +243,11 @@ class SettingsPage(QWidget):
         s.menu_hotkey = self.ed_menu.text().strip().lower() or "f6"
         s.type_key = self.ed_type.text().strip().lower() or "t"
         s.normalize()
+        # показать в полях то, что реально сохранилось (кириллица → латиница)
+        if self.ed_menu.text() != s.menu_hotkey.upper():
+            self.ed_menu.setText(s.menu_hotkey.upper())
+        if self.ed_type.text() != s.type_key:
+            self.ed_type.setText(s.type_key)
         self.store.save()
         self.settings_changed.emit()
 
@@ -409,23 +422,78 @@ class SettingsPage(QWidget):
     # -------------------------------------------------------------- capture --
     def _start_capture(self, which: str) -> None:
         self._capture_target = which
-        self._capture_timer.start(10000)
+        self._capture_left = 10
+        self._capture_timer.start(1000)      # тик раз в секунду — обратный отсчёт
+        msg = "Захват окна: переключитесь в ИГРУ в течение 10 с…"
+        if which == "target":
+            self.lbl_target_status.setStyleSheet(f"color: {MUTED};")
+            self.lbl_target_status.setText(msg)
+        else:
+            self.lbl_wl_hint.setStyleSheet(f"color: {MUTED};")
+            self.lbl_wl_hint.setText(msg)
+
+    def _capture_tick(self) -> None:
+        self._capture_left -= 1
+        if self._capture_left > 0:
+            msg = f"Захват окна: переключитесь в игру… {self._capture_left} с"
+            if self._capture_target == "target":
+                self.lbl_target_status.setStyleSheet(f"color: {MUTED};")
+                self.lbl_target_status.setText(msg)
+            else:
+                self.lbl_wl_hint.setStyleSheet(f"color: {MUTED};")
+                self.lbl_wl_hint.setText(msg)
+            return
+        self._capture_timer.stop()
+        self._do_capture()
+
+    def _is_own_window(self, fg: dict) -> bool:
+        """Захватили не игру, а окно самой программы? (частая ошибка ранее)"""
+        try:
+            own_hwnd = int(self.window().winId()) if sys.platform == "win32" else 0
+        except Exception:
+            own_hwnd = 0
+        if own_hwnd and fg.get("hwnd") == own_hwnd:
+            return True
+        exe_name = (fg.get("exe") or "").rsplit("\\", 1)[-1].lower()
+        own_exe = os.path.basename(sys.executable).lower()
+        return bool(exe_name) and exe_name == own_exe
 
     def _do_capture(self) -> None:
         which, self._capture_target = self._capture_target, None
         fg = window_utils.get_foreground_window()
         if not fg:
+            if which == "target":
+                self.lbl_target_status.setStyleSheet(f"color: {DANGER};")
+                self.lbl_target_status.setText(
+                    "✗ Окно не найдено. Нажмите кнопку и ПЕРЕКЛЮЧИТЕСЬ в игру за 10 секунд."
+                )
+            else:
+                self.lbl_wl_hint.setStyleSheet(f"color: {DANGER};")
+                self.lbl_wl_hint.setText("✗ Окно не найдено — попробуйте ещё раз.")
             return
+        if self._is_own_window(fg):
+            msg = ("✗ Это окно САМОЙ программы, а не игры. Нажмите кнопку и "
+                   "переключитесь в игру за 10 секунд.")
+            if which == "target":
+                self.lbl_target_status.setStyleSheet(f"color: {DANGER};")
+                self.lbl_target_status.setText(msg)
+            else:
+                self.lbl_wl_hint.setStyleSheet(f"color: {DANGER};")
+                self.lbl_wl_hint.setText(msg)
+            return
+        title = fg.get("title") or ""
+        exe = (fg.get("exe") or "").rsplit("\\", 1)[-1]
         if which == "target":
-            self.ed_target_title.setText(fg.get("title") or "")
-            exe = (fg.get("exe") or "").rsplit("\\", 1)[-1]
+            self.ed_target_title.setText(title)
             self.ed_target_exe.setText(exe)
             self._apply_target()
+            self.lbl_target_status.setStyleSheet(f"color: {OK};")
+            self.lbl_target_status.setText(
+                f"✓ Захвачено: «{title[:60]}» ({exe}) — нажмите «💾 Сохранить настройки»"
+            )
         elif which == "whitelist":
             cur_exe = self.txt_wl_exe.toPlainText().splitlines()
             cur_title = self.txt_wl_title.toPlainText().splitlines()
-            exe = (fg.get("exe") or "")
-            title = (fg.get("title") or "")
             if exe and exe not in cur_exe:
                 cur_exe.append(exe)
             if title and title not in cur_title:
@@ -433,6 +501,8 @@ class SettingsPage(QWidget):
             self.txt_wl_exe.setPlainText("\n".join(x for x in cur_exe if x))
             self.txt_wl_title.setPlainText("\n".join(x for x in cur_title if x))
             self._apply_wl_text()
+            self.lbl_wl_hint.setStyleSheet(f"color: {OK};")
+            self.lbl_wl_hint.setText(f"✓ Добавлено в белый список: {exe or title[:40]}")
 
     def _check_target(self) -> None:
         title = self.ed_target_title.text().strip()

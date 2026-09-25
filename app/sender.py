@@ -18,7 +18,12 @@ from typing import Callable, Optional
 from PySide6.QtCore import QObject, Signal, Slot
 
 from . import injector, window_utils
+from .journal import log
 from .models import Settings, TextEntry
+
+# Маркеры окна игры для автопоиска, если в настройках цель НЕ задана (v3.4.2)
+_GAME_TITLE_MARKERS = ("majestic", "rage", "gta", "grand theft auto")
+_GAME_EXE_MARKERS = ("majestic", "ragemp", "rage_mp", "rageplugin", "gta5", "gta")
 
 
 class Sender(QObject):
@@ -38,15 +43,34 @@ class Sender(QObject):
         self._hide_overlay = hide_overlay
 
     # ----------------------------------------------------- целевое окно игры --
+    def _autodetect_game_hwnd(self) -> int:
+        """Автопоиск окна игры по известным маркерам (когда цель не задана)."""
+        try:
+            for marker in _GAME_TITLE_MARKERS:
+                hwnd = window_utils.find_target_window(marker, "")
+                if hwnd:
+                    log(f"автопоиск: окно игры найдено по заголовку «{marker}» (hwnd={hwnd})")
+                    return hwnd
+            for marker in _GAME_EXE_MARKERS:
+                hwnd = window_utils.find_target_window("", marker)
+                if hwnd:
+                    log(f"автопоиск: окно игры найдено по процессу «{marker}» (hwnd={hwnd})")
+                    return hwnd
+        except Exception:
+            pass
+        return 0
+
     def _resolve_target_hwnd(self, settings: Settings) -> int:
         title = (getattr(settings, "target_title", "") or "").strip()
-        if not title:
-            return 0
         exe = (getattr(settings, "target_exe", "") or "").strip()
-        try:
-            return window_utils.find_target_window(title, exe)
-        except Exception:
-            return 0
+        if title or exe:
+            try:
+                return window_utils.find_target_window(title, exe)
+            except Exception:
+                return 0
+        # цель не задана — пробуем найти игру сами (v3.4.2: перенос в игру
+        # после копирования работал только при ручной настройке окна)
+        return self._autodetect_game_hwnd()
 
     def _focus_game(self, settings: Settings, prev_hwnd: int) -> int:
         """Фокус на окно игры (по настройке) или на прежнее окно. Возвращает hwnd."""
@@ -85,10 +109,17 @@ class Sender(QObject):
         if method == "copy":
             self.copy_requested.emit(entry.text)
             time.sleep(0.3)                   # даём GUI-потоку положить в буфер
-            self._focus_game(settings, prev_hwnd)
-            self.status.emit(
-                f"Скопировано: {entry.title or 'фраза'}. В игре: T → Ctrl+V (Enter сами)"
-            )
+            focused = self._focus_game(settings, prev_hwnd)
+            if focused:
+                self.status.emit(
+                    f"Скопировано: {entry.title or 'фраза'} — вы в игре. "
+                    "Жмите T и вставляйте Ctrl+V (Enter сами)"
+                )
+            else:
+                self.status.emit(
+                    f"Скопировано: {entry.title or 'фраза'}. Окно игры НЕ найдено — "
+                    "переключитесь сами или укажите его в Настройки → «Окно игры»"
+                )
             self.used.emit(entry.id)
             return
 

@@ -23,7 +23,27 @@ INJECT_HINTS = {
 
 MODIFIERS = {"ctrl", "alt", "shift", "win"}
 _FKEY_RE = re.compile(r"^f([1-9]|[12][0-9])$")
-_MOD_KEY_RE = re.compile(r"^((ctrl|alt|shift|win)\+)+([a-z0-9])$")
+# одиночная клавиша (с модификаторами или без): буква/цифра или знак (` - = [ ] ; ' , . / \)
+# v3.4.2: модификатор теперь НЕ обязателен — раньше «t» считалась ошибкой
+_MOD_KEY_RE = re.compile(r"^((ctrl|alt|shift|win)\+)*([a-z0-9`=\[\];',./\\-])$")
+
+# ЙЦУКЕН → латиница (та же ФИЗИЧЕСКАЯ клавиша). Если пользователь вводил
+# клавишу чата с русской раскладкой («е» вместо «t», «ё» вместо «`»),
+# программа сама превратит её в правильную физическую клавишу (v3.4.2).
+_CYR_TO_LATIN = {
+    "й": "q", "ц": "w", "у": "e", "к": "r", "е": "t", "н": "y",
+    "г": "u", "ш": "i", "щ": "o", "з": "p",
+    "ф": "a", "ы": "s", "в": "d", "а": "f", "п": "g", "р": "h",
+    "о": "j", "л": "k", "д": "l",
+    "я": "z", "ч": "x", "с": "c", "м": "v", "и": "b", "т": "n", "ь": "m",
+    "ё": "`", "б": ",", "ю": ".", "ж": ";", "э": "'", "х": "]", "ъ": "\\",
+}
+
+
+def to_latin_key(key: str) -> str:
+    """Кириллица → латиница по физическим клавишам («е»→«t», «ё»→«`»)."""
+    s = (key or "").strip().lower()
+    return "".join(_CYR_TO_LATIN.get(ch, ch) for ch in s)
 
 
 def normalize_hotkey(hotkey: str) -> str:
@@ -169,8 +189,9 @@ class Settings:
         return s
 
     def normalize(self) -> None:
-        self.menu_hotkey = normalize_hotkey(self.menu_hotkey) or "f6"
-        self.type_key = normalize_hotkey(self.type_key) or "t"
+        # кириллица → физическая латинская клавиша (v3.4.2: «нажимает ё»)
+        self.menu_hotkey = normalize_hotkey(to_latin_key(self.menu_hotkey)) or "f6"
+        self.type_key = normalize_hotkey(to_latin_key(self.type_key)) or "t"
         try:
             self.pre_delay_ms = int(self.pre_delay_ms)
         except Exception:

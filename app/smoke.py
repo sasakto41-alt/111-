@@ -311,6 +311,74 @@ def run_smoke() -> int:
     except Exception as e:
         check(f"window_utils v3.4.1: {type(e).__name__}: {e}", False)
 
+    # 15. v3.4.2: кириллица в клавишах, сканкоды, DRY, автопоиск игры
+    try:
+        from app.models import to_latin_key
+
+        check("to_latin_key('е') == 't' (кириллица → физическая клавиша)",
+              to_latin_key("е") == "t")
+        check("to_latin_key('ё') == '`'", to_latin_key("ё") == "`")
+        check("to_latin_key('ctrl+ш') == 'ctrl+i'", to_latin_key("ctrl+ш") == "ctrl+i")
+        check("to_latin_key('F6') == 'f6'", to_latin_key("F6") == "f6")
+        s4 = models.Settings()
+        s4.type_key = "е"          # пользователь ввёл клавишу чата с RU-раскладкой
+        s4.normalize()
+        check("Settings.normalize: клавиша чата «е» → «t»", s4.type_key == "t")
+        check("is_valid_hotkey('t') теперь True (одиночная клавиша без модификатора)",
+              models.is_valid_hotkey("t") and models.is_valid_hotkey("`"))
+        s5 = models.Settings()
+        s5.type_key = "ё"
+        s5.normalize()
+        check("Settings.normalize: «ё» → «`» и проходит валидацию",
+              s5.type_key == "`" and models.is_valid_hotkey(s5.type_key))
+        import app.injector as inj
+
+        check("injector._vk_for('е') == 0x54 (физическая T)",
+              inj._vk_for("е") == 0x54)
+        check("injector._vk_for('ё') == 0xC0 (физическая `)",
+              inj._vk_for("ё") == 0xC0)
+        check("injector._vk_for('t') == 0x54", inj._vk_for("t") == 0x54)
+        check("injector: KEYEVENTF_SCANCODE определён",
+              getattr(inj, "KEYEVENTF_SCANCODE", 0) == 0x0008)
+        check("injector: DRY_RUN не нажимает клавиши (_key_down безопасен)",
+              (inj._key_down(0x54), True)[1])
+        check("injector: press_combo('ctrl+v') не падает (DRY/не-Windows)",
+              (inj.press_combo("ctrl+v"), True)[1])
+        check("injector: Enter по-прежнему заблокирован",
+              inj._vk_for("enter") == 0)
+        import app.sender as _sender_mod
+
+        check("sender: маркеры автопоиска игры заданы",
+              hasattr(_sender_mod.Sender, "_autodetect_game_hwnd")
+              and "majestic" in _sender_mod._GAME_TITLE_MARKERS
+              and "ragemp" in _sender_mod._GAME_EXE_MARKERS)
+        with tempfile.TemporaryDirectory() as td:
+            st = Store(path=Path(td) / "d.json")
+            snd2 = Sender(settings_getter=lambda: st.settings)
+            hwnd = snd2._resolve_target_hwnd(st.settings)
+            check("sender: цель без настроек безопасно резолвится (0 вне Windows)",
+                  hwnd == 0 or isinstance(hwnd, int))
+        # захват окна: обратный отсчёт и защита от захвата своего окна
+        from PySide6.QtWidgets import QApplication
+
+        if QApplication.instance() is None:
+            QApplication([])
+        with tempfile.TemporaryDirectory() as td:
+            st = Store(path=Path(td) / "d.json")
+            from app.ui.settings import SettingsPage
+
+            sp2 = SettingsPage(st)
+            check("захват: есть обратный отсчёт (_capture_tick)",
+                  callable(sp2._capture_tick) and sp2._capture_left == 0)
+            check("захват: есть защита от захвата окна самой программы",
+                  callable(sp2._is_own_window))
+            sp2._capture_target = "target"
+            sp2._do_capture()          # вне Windows fg=None → понятное сообщение
+            check("захват: без окна показывает ошибку, а не молчит",
+                  "не найдено" in sp2.lbl_target_status.text().lower())
+    except Exception as e:
+        check(f"v3.4.2: {type(e).__name__}: {e}", False)
+
     return _finish()
 
 

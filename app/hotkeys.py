@@ -21,7 +21,7 @@ from typing import Callable, Iterable, Optional
 from PySide6.QtCore import QObject, Signal
 
 from .journal import log
-from .models import TextEntry, normalize_hotkey
+from .models import TextEntry, normalize_hotkey, to_latin_key
 
 try:
     import keyboard
@@ -35,8 +35,8 @@ _VK_SIMPLE = {"ctrl": 0x11, "alt": 0x12, "shift": 0x10}
 
 
 def vk_for_key(key: str) -> Optional[int]:
-    """Виртуальный код клавиши (VK) для имени из хоткея."""
-    k = (key or "").strip().lower()
+    """Виртуальный код клавиши (VK) для имени из хоткея (кириллица тоже)."""
+    k = to_latin_key((key or "").strip().lower())
     if not k:
         return None
     if k in _VK_SIMPLE:
