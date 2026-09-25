@@ -25,8 +25,9 @@ from typing import List, Tuple
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QListWidget, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
+    QLabel, QListWidget, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
+    QWidget,
 )
 
 from .. import window_utils
@@ -218,8 +219,9 @@ class GovWaveOverlay(QWidget):
 
         self.lst_steps = QListWidget()
         self.lst_steps.setToolTip(
-            "Шаги отправляются по порядку после подтверждения. "
-            "Между шагами пауза — вы жмёте Enter в игре сами."
+            "Шаги отправляются по порядку после подтверждения. После каждого "
+            "шага программа нажимает Enter (автоотправка), и макрос идёт "
+            "к следующему сообщению."
         )
         right.addWidget(self.lst_steps, 1)
 
@@ -252,17 +254,27 @@ class GovWaveOverlay(QWidget):
         right.addLayout(row_a)
 
         row_p = QHBoxLayout()
-        row_p.addWidget(QLabel("Пауза между шагами:"))
+        row_p.addWidget(QLabel("Пауза после шага:"))
         self.sp_pause = QSpinBox()
         self.sp_pause.setRange(500, 30000)
         self.sp_pause.setSingleStep(500)
         self.sp_pause.setSuffix(" мс")
         self.sp_pause.setToolTip(
-            "Пауза после каждого шага, чтобы вы успели нажать Enter в игре. "
-            "Enter программой не нажимается никогда."
+            "Пауза после каждого шага (текст уже отправлен, Enter уже нажат "
+            "программой) перед следующим шагом."
         )
         row_p.addWidget(self.sp_pause, 1)
         right.addLayout(row_p)
+
+        self.chk_enter = QCheckBox("Нажимать Enter после каждого шага")
+        self.chk_enter.setToolTip(
+            "Включено (v3.7.0): после каждого сообщения макрос сам нажмёт "
+            "Enter — чат отправится и начнётся следующий шаг (автоотправка). "
+            "Выключено: Enter нажимаете вы сами. В режиме «буфер» авто-Enter "
+            "не нажимается — вставляете сами."
+        )
+        right.addWidget(self.chk_enter)
+        self.chk_enter.toggled.connect(self._persist_enter)
 
         self.lbl_macro_hk = QLabel("")
         self.lbl_macro_hk.setObjectName("hint")
@@ -362,6 +374,7 @@ class GovWaveOverlay(QWidget):
                 self.sp_pause.setValue(int(getattr(s, "gov_macro_step_pause_ms", 4000)))
             except Exception:
                 self.sp_pause.setValue(4000)
+            self.chk_enter.setChecked(bool(getattr(s, "gov_macro_press_enter", True)))
             hk = (getattr(s, "gov_macro_hotkey", "f8") or "f8").upper()
             sec = getattr(s, "gov_macro_confirm_sec", 5)
             on = "включён" if getattr(s, "gov_macro_enabled", False) else "ВЫКЛЮЧЕН (Настройки)"
@@ -463,14 +476,28 @@ class GovWaveOverlay(QWidget):
             s = self.store.settings
             s.gov_macro_steps = self._steps_now() or [getattr(s, "gov_macro_action", "step2")]
             s.gov_macro_step_pause_ms = int(self.sp_pause.value())
+            s.gov_macro_press_enter = bool(self.chk_enter.isChecked())
             self.store.save()
             self.lbl_macro_status.setText("✓ сохранено")
             log(f"макрос: шаги = {' → '.join(s.gov_macro_steps)}; "
-                f"пауза {s.gov_macro_step_pause_ms} мс")
+                f"пауза {s.gov_macro_step_pause_ms} мс; авто-Enter={s.gov_macro_press_enter}")
             self.macro_changed.emit()
         except Exception as e:
             self.lbl_macro_status.setText(f"ошибка: {e}")
             log(f"макрос: ошибка сохранения: {e}")
+
+    def _persist_enter(self, on: bool) -> None:
+        """Галочка «Enter после каждого шага» — сразу в настройки."""
+        if getattr(self, "_loading_macro", False):
+            return
+        try:
+            self.store.settings.gov_macro_press_enter = bool(on)
+            self.store.save()
+            self.lbl_macro_status.setText("✓ сохранено")
+            log(f"макрос: авто-Enter = {'вкл' if on else 'выкл'}")
+        except Exception as e:
+            self.lbl_macro_status.setText(f"ошибка: {e}")
+            log(f"макрос: ошибка сохранения авто-Enter: {e}")
 
     def _persist_macro_clicked(self) -> None:
         self._persist_macro()
@@ -673,11 +700,18 @@ class MacroConfirmDialog(QWidget):
             sec = 5
         self._remaining = max(0, sec)
         self._update_yes_button()
+        pe = bool(getattr(s, "gov_macro_press_enter", True))
+        enter_tail = (
+            "После каждого шага программа САМА нажмёт Enter — сообщение "
+            "уйдёт в чат и начнётся следующий."
+            if pe else
+            "Enter в игре вы нажимаете сами после каждого шага."
+        )
         self.lbl_hint.setText(
             "Кнопка «Да» станет активной через "
             + (f"{self._remaining} с" if self._remaining > 0 else "0 с")
-            + " — защита от случайного нажатия. Шаги отправятся по порядку, "
-              "Enter в игре вы нажимаете сами. Esc — «Нет»."
+            + " — защита от случайного нажатия. Шаги отправятся по порядку. "
+              + enter_tail + " Esc — «Нет»."
         )
         self._prev_hwnd = window_utils.get_foreground_hwnd()
         move_to_screen_of(self, self._prev_hwnd)

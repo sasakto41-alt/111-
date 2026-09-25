@@ -214,3 +214,25 @@ def press_combo(combo: str) -> None:
 
 def press_ctrl_v() -> None:
     press_combo("ctrl+v")
+
+
+VK_RETURN = 0x0D
+
+
+def press_enter() -> None:
+    """Нажать Enter — ТОЛЬКО для автоотправки шагов макроса (v3.7.0).
+
+    Обычная вставка фраз Enter НЕ нажимает (press_combo блокирует его
+    намеренно). Здесь исключение: пользователь ВКЛЮЧИЛ авто-Enter в макросе
+    госволны — после каждого сообщения программа сама подтверждает чат
+    (Enter), и последовательность идёт к следующему шагу. Отключается
+    галочкой «Нажимать Enter после каждого шага» в меню F7 / Настройках.
+    """
+    if DRY_RUN:
+        _log("press_enter (макрос: авто-Enter)")
+        return
+    if not _is_windows:
+        _log("press_enter()")
+        return
+    _press_key(VK_RETURN)
+    _log("press_enter (макрос: авто-Enter)")

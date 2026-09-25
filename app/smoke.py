@@ -652,6 +652,184 @@ def run_smoke() -> int:
     except Exception as e:
         check(f"v3.6.0: {type(e).__name__}: {e}", False)
 
+    # 18. v3.7.0: уведомление о госволне (красный квадратик) + авто-Enter макроса
+    try:
+        import inspect as _insp
+
+        from datetime import datetime as _DT
+
+        from PySide6.QtCore import Qt as _Qt7
+        from PySide6.QtWidgets import QApplication as _QA7
+
+        if _QA7.instance() is None:
+            _QA7([])
+
+        # --- новые поля настроек ---
+        s8 = models.Settings()
+        check("v3.7.0: поля gov_notify_*/gov_macro_press_enter существуют",
+              hasattr(s8, "gov_notify_enabled") and hasattr(s8, "gov_notify_minutes")
+              and hasattr(s8, "gov_macro_press_enter"))
+        check("v3.7.0: по умолчанию уведомление ВКЛ и 3 минуты, авто-Enter ВКЛ",
+              s8.gov_notify_enabled is True and s8.gov_notify_minutes == 3
+              and s8.gov_macro_press_enter is True)
+        s8.gov_notify_minutes = 99
+        s8.gov_macro_press_enter = 0
+        s8.normalize()
+        check("v3.7.0: normalize зажимает минуты 1..30 и приводит флаги к bool",
+              s8.gov_notify_minutes == 30 and s8.gov_macro_press_enter is False)
+        s8c = models.Settings.from_dict({"gov_notify_minutes": 0, "gov_notify_enabled": True})
+        check("v3.7.0: from_dict → минуты не меньше 1", s8c.gov_notify_minutes == 1)
+
+        # --- расчёт окна уведомления ---
+        from app.ui.gov_wave import gov_alert_state
+
+        with tempfile.TemporaryDirectory() as td:
+            st8 = Store(path=Path(td) / "d.json")
+            now8 = _DT(2026, 1, 20, 14, 58, 30)
+            st8.settings.gov_last_slots = "15:00 15:20 15:40"   # первый через 1.5 мин
+            st8.settings.gov_notify_minutes = 3
+            res = gov_alert_state(st8.settings, now=now8)
+            check("v3.7.0: за 3 мин до слота уведомление запланировано",
+                  res is not None and res[0] == "15:00" and 1.0 <= res[1] <= 2.0)
+            st8.settings.gov_notify_minutes = 1
+            check("v3.7.0: окно 1 мин — ещё рано (до слота 1.5 мин)",
+                  gov_alert_state(st8.settings, now=now8) is None)
+            st8.settings.gov_notify_minutes = 3
+            now_far = _DT(2026, 1, 20, 12, 0, 0)
+            check("v3.7.0: далеко от слотов — уведомления нет",
+                  gov_alert_state(st8.settings, now=now_far) is None)
+            now_after = _DT(2026, 1, 20, 15, 41, 0)
+            check("v3.7.0: все слоты прошли сегодня — уведомления нет",
+                  gov_alert_state(st8.settings, now=now_after) is None)
+            # выбор БЛИЖАЙШЕГО слота: 15:20 ближе, чем 15:40
+            now_near2 = _DT(2026, 1, 20, 15, 18, 10)
+            res2 = gov_alert_state(st8.settings, now=now_near2)
+            check("v3.7.0: выбирается ближайший слот (15:20, ~1.8 мин)",
+                  res2 is not None and res2[0] == "15:20" and 1.5 <= res2[1] <= 2.0)
+
+        # --- injector: авто-Enter только в отдельной функции ---
+        from app import injector as _inj
+
+        check("v3.7.0: injector.press_enter существует (VK_RETURN)",
+              hasattr(_inj, "press_enter") and _inj.VK_RETURN == 0x0D)
+        _pc_src = _insp.getsource(_inj.press_combo)
+        check("v3.7.0: press_combo по-прежнему БЛОКИРУЕТ Enter",
+              "ЗАБЛОКИРОВАНО" in _pc_src and "enter" in _pc_src)
+        _pe_src = _insp.getsource(_inj.press_enter)
+        check("v3.7.0: press_enter документирован как исключение для макроса",
+              "макрос" in _pe_src and "DRY_RUN" in _pe_src)
+
+        # --- sender: параметр press_enter и сигнал requested_seq ---
+        from app.sender import SendWorker as _SW8, Sender as _S8
+
+        check("v3.7.0: Sender.send_text принимает press_enter",
+              "press_enter" in _insp.getsource(_S8.send_text))
+        check("v3.7.0: SendWorker.requested_seq (запись, press_enter)",
+              hasattr(_SW8, "requested_seq"))
+        _impl_src = _insp.getsource(_S8._send_text_impl)
+        check("v3.7.0: авто-Enter жмётся ПОСЛЕ текста (unicode/ctrlv)",
+              "press_enter" in _impl_src and "injector.press_enter" in _impl_src)
+        check("v3.7.0: в режиме «буфер» авто-Enter НЕ нажимается",
+              "пропущен" in _impl_src)
+
+        # --- красное уведомление ---
+        from app.ui.gov_notify import GovNotifyToast
+
+        toast8 = GovNotifyToast()
+        check("v3.7.0: уведомление — безрамный Tool поверх всего",
+              bool(int(toast8.windowFlags()) & _Qt7.FramelessWindowHint)
+              and bool(int(toast8.windowFlags()) & _Qt7.WindowStaysOnTopHint))
+        check("v3.7.0: уведомление НЕ забирает фокус (WA_ShowWithoutActivating)",
+              toast8.testAttribute(_Qt7.WA_ShowWithoutActivating))
+        toast8.popup(2.4, "15:00", "LSCSD")
+        _qa8 = _QA7.instance()
+        _qa8.processEvents()
+        check("v3.7.0: popup показывает красный квадратик с текстом «ЧЕРЕЗ ~2 МИН»",
+              toast8.isVisible() and "ЧЕРЕЗ ~2 МИН" in toast8.lbl_title.text()
+              and "15:00" in toast8.lbl_sub.text())
+        check("v3.7.0: красный фон уведомления",
+              "#DC2626" in toast8.styleSheet())
+        toast8.popup(0.2, "15:00")
+        check("v3.7.0: при <1 мин текст «НАЧИНАЕТСЯ»",
+              "НАЧИНАЕТСЯ" in toast8.lbl_title.text())
+        toast8.dismiss()
+        check("v3.7.0: dismiss скрывает уведомление", not toast8.isVisible())
+
+        # --- интеграция в главное окно: таймер-опрос и макрос с авто-Enter ---
+        from app.hotkeys import HotkeyManager as _HKM8
+
+        with tempfile.TemporaryDirectory() as td2:
+            st8b = Store(path=Path(td2) / "d.json")
+            win8 = MainWindow(st8b, _HKM8())
+            check("v3.7.0: у главного окна есть таймер опроса 5 с",
+                  getattr(win8, "_notify_timer", None) is not None
+                  and win8._notify_timer.interval() == 5000
+                  and win8._notify_timer.isActive())
+            check("v3.7.0: GovNotifyToast создан и не перехватывает фокус",
+                  isinstance(win8._gov_notify, GovNotifyToast)
+                  and win8._gov_notify.testAttribute(_Qt7.WA_ShowWithoutActivating))
+            win8._check_gov_notify()   # слотов нет — ничего не показывает
+            check("v3.7.0: опрос без слотов не падает и не показывает тост",
+                  not win8._gov_notify.isVisible())
+            st8b.settings.gov_last_slots = "15:00 15:20 15:40"
+            win8._check_gov_notify()
+            check("v3.7.0: опрос показал уведомление (если окно скоро) и запомнил слот",
+                  isinstance(win8._gov_notified_keys, set))
+            win8._check_gov_notify()
+            check("v3.7.0: дедуп — повторный опрос НЕ показывает снова",
+                  len(win8._gov_notified_keys) <= 1)
+            win8._notify_timer.stop()
+
+            # макрос: последовательность с авто-Enter (без реального ввода)
+            st8b.settings.gov_macro_steps = ["step2", "step4"]
+            win8._macro_confirmed()
+            check("v3.7.0: макрос шагает с авто-Enter (тост шага 1)",
+                  win8._seq_i == 1 and len(win8._seq) == 2)
+            win8._seq_i = len(win8._seq)
+            win8._seq_step(500, True)
+            check("v3.7.0: конец последовательности → «выполнен полностью»",
+                  win8._seq_i >= len(win8._seq))
+            win8.hotkeys.stop()
+            win8._notify_timer.stop()
+            win8._gov_notify.dismiss()
+
+        # --- настройки и меню F7: галочка авто-Enter ---
+        from app.ui.settings import SettingsPage as _SP8
+
+        with tempfile.TemporaryDirectory() as td3:
+            sp8 = _SP8(Store(path=Path(td3) / "e.json"))
+            check("v3.7.0: в Настройках есть галочка авто-Enter макроса",
+                  hasattr(sp8, "chk_enter") and "Enter" in sp8.chk_enter.text())
+            check("v3.7.0: в Настройках есть секция уведомления (красный квадратик)",
+                  hasattr(sp8, "chk_notify") and hasattr(sp8, "sp_notify_min")
+                  and sp8.sp_notify_min.value() == 3)
+            sp8.sp_notify_min.setValue(10)
+            sp8._apply_notify()
+            check("v3.7.0: «за сколько минут» сохраняется в настройки",
+                  sp8.store.settings.gov_notify_minutes == 10)
+
+            ov8 = GovWaveOverlay(sp8.store)
+            check("v3.7.0: в меню F7 есть галочка «Enter после каждого шага»",
+                  hasattr(ov8, "chk_enter") and ov8.chk_enter.isChecked())
+            ov8.chk_enter.setChecked(False)
+            check("v3.7.0: переключение галочки в меню сохраняется",
+                  ov8.store.settings.gov_macro_press_enter is False)
+            ov8.chk_enter.setChecked(True)
+            check("v3.7.0: возврат галочки сохраняется",
+                  ov8.store.settings.gov_macro_press_enter is True)
+            dlg8 = MacroConfirmDialog(sp8.store)
+            dlg8.open_dialog()
+            check("v3.7.0: подтверждение обещает САМО нажать Enter (по настройке)",
+                  "САМА нажмёт Enter" in dlg8.lbl_hint.text())
+            sp8.store.settings.gov_macro_press_enter = False
+            dlg8.open_dialog()
+            check("v3.7.0: при выключенном авто-Enter — «нажимаете вы сами»",
+                  "сами" in dlg8.lbl_hint.text())
+            dlg8.hide()
+            ov8._do_hide()
+    except Exception as e:
+        check(f"v3.7.0: {type(e).__name__}: {e}", False)
+
     return _finish()
 
 

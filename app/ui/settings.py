@@ -32,6 +32,11 @@ class SettingsPage(QWidget):
         # сигналы settings_changed подавляются и испускаются ОДИН раз —
         # раньше каждое поле перезапускало хоткеи (join потоков) — UI «мерз»
         self._suspend_emit = False
+        # v3.7.0: True внутри _load() — программные setChecked/setValue НЕ должны
+        # запускать _apply_*: раньше cb_macro_action.setCurrentIndex во время
+        # загрузки писал gov_macro_press_enter=False (чекбокс ещё не загружен),
+        # а chk_notify затирал «3 мин» значением спинбокса по умолчанию
+        self._loading = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -194,6 +199,15 @@ class SettingsPage(QWidget):
         self.sp_pause.setSingleStep(500)
         self.sp_pause.setSuffix(" мс")
         form_m.addRow("Пауза между шагами макроса:", self.sp_pause)
+        self.chk_enter = QCheckBox("Нажимать Enter после каждого шага (автоотправка)")
+        self.chk_enter.setToolTip(
+            "Включено (v3.7.0): после каждого шага макрос программа сама "
+            "нажмёт Enter — сообщение уйдёт в чат и начнётся следующий шаг. "
+            "Выключено: Enter в игре нажимаете вы сами.\n"
+            "В режиме «Копировать в буфер» авто-Enter НЕ нажимается — "
+            "сообщение ещё не в чате."
+        )
+        form_m.addRow("", self.chk_enter)
         sec_govmenu.body_layout().addLayout(form_m)
         self.lbl_gov_hint = QLabel(
             "Последовательность шагов макроса собирается ПРЯМО в меню Госволны "
@@ -206,6 +220,34 @@ class SettingsPage(QWidget):
         self.lbl_gov_hint.setWordWrap(True)
         sec_govmenu.body_layout().addWidget(self.lbl_gov_hint)
         v.addWidget(sec_govmenu)
+
+        # -------------------------------- уведомление о госволне (v3.7.0) --
+        sec_notify = SectionFrame("Уведомление о госволне (красный квадратик)")
+        self.chk_notify = QCheckBox("Предупреждать, когда скоро госволна")
+        self.chk_notify.setToolTip(
+            "Программа опрашивает часы каждые 5 секунд. За N минут до времени, "
+            "которое подобрало приложение (слоты в разделе «Госволна»), "
+            "поверх игры вылетит КРАСНОЕ уведомление. Оно не забирает фокус "
+            "и не мешает игре (клики проходят сквозь него)."
+        )
+        sec_notify.body_layout().addWidget(self.chk_notify)
+        form_n = QFormLayout()
+        form_n.setSpacing(8)
+        self.sp_notify_min = QSpinBox()
+        self.sp_notify_min.setRange(1, 30)
+        self.sp_notify_min.setSuffix(" мин")
+        self.sp_notify_min.setToolTip("За сколько минут до волны показать уведомление (по умолчанию 3)")
+        form_n.addRow("За сколько минут до волны:", self.sp_notify_min)
+        sec_notify.body_layout().addLayout(form_n)
+        self.lbl_notify_hint = QLabel(
+            "Уведомление прилетает за N минут до ПЕРВОГО слота, который подобрало "
+            "приложение (кнопка «Подобрать время» / «Подшитать время»). "
+            "Слот предупреждается один раз. Само уведомление исчезает через 30 секунд."
+        )
+        self.lbl_notify_hint.setObjectName("hint")
+        self.lbl_notify_hint.setWordWrap(True)
+        sec_notify.body_layout().addWidget(self.lbl_notify_hint)
+        v.addWidget(sec_notify)
 
         # ---------------------------------------------------- часовой пояс --
         sec_tz = SectionFrame("Часовой пояс госволны")
@@ -279,6 +321,9 @@ class SettingsPage(QWidget):
         self.cb_macro_action.currentIndexChanged.connect(self._apply_macro_misc)
         self.sp_confirm.valueChanged.connect(self._apply_macro_misc)
         self.sp_pause.valueChanged.connect(self._apply_macro_misc)
+        self.chk_enter.toggled.connect(self._apply_macro_misc)
+        self.chk_notify.toggled.connect(self._apply_notify)
+        self.sp_notify_min.valueChanged.connect(self._apply_notify)
 
         self._capture_timer = QTimer(self)
         self._capture_timer.timeout.connect(self._capture_tick)
@@ -288,6 +333,13 @@ class SettingsPage(QWidget):
 
     # ----------------------------------------------------------------- load --
     def _load(self) -> None:
+        self._loading = True
+        try:
+            self._load_fields()
+        finally:
+            self._loading = False
+
+    def _load_fields(self) -> None:
         s = self.store.settings
         self.ed_menu.setText(s.menu_hotkey.upper())
         self.ed_type.setText(s.type_key)
@@ -315,6 +367,12 @@ class SettingsPage(QWidget):
             self.sp_pause.setValue(int(getattr(s, "gov_macro_step_pause_ms", 4000)))
         except Exception:
             self.sp_pause.setValue(4000)
+        self.chk_enter.setChecked(bool(getattr(s, "gov_macro_press_enter", True)))
+        self.chk_notify.setChecked(bool(getattr(s, "gov_notify_enabled", True)))
+        try:
+            self.sp_notify_min.setValue(int(getattr(s, "gov_notify_minutes", 3)))
+        except Exception:
+            self.sp_notify_min.setValue(3)
         self._load_tz()
 
     # ---------------------------------------------------------------- apply --
@@ -323,7 +381,13 @@ class SettingsPage(QWidget):
         if not self._suspend_emit:
             self.settings_changed.emit()
 
+    def _busy_loading(self) -> bool:
+        """True во время _load(): программные изменения полей не применяются."""
+        return getattr(self, "_loading", False)
+
     def _apply_keys(self) -> None:
+        if self._busy_loading():
+            return
         s = self.store.settings
         s.menu_hotkey = self.ed_menu.text().strip().lower() or "f6"
         s.type_key = self.ed_type.text().strip().lower() or "t"
@@ -337,10 +401,14 @@ class SettingsPage(QWidget):
         self._emit_changed()
 
     def _apply_delay(self, val: int) -> None:
+        if self._busy_loading():
+            return
         self.store.settings.pre_delay_ms = int(val)
         self.store.save()
 
     def _apply_inject(self) -> None:
+        if self._busy_loading():
+            return
         m = self.cb_inject.currentData() or "unicode"
         self.store.settings.inject_method = m
         self.store.save()
@@ -348,21 +416,29 @@ class SettingsPage(QWidget):
         self._emit_changed()
 
     def _apply_tray(self, on: bool) -> None:
+        if self._busy_loading():
+            return
         self.store.settings.tray_enabled = bool(on)
         self.store.save()
         self._emit_changed()
 
     def _apply_wl(self, on: bool) -> None:
+        if self._busy_loading():
+            return
         self.store.settings.whitelist_enabled = bool(on)
         self.store.save()
 
     def _apply_wl_text(self) -> None:
+        if self._busy_loading():
+            return
         s = self.store.settings
         s.whitelist_exes = [x.strip() for x in self.txt_wl_exe.toPlainText().splitlines() if x.strip()]
         s.whitelist_titles = [t.strip() for t in self.txt_wl_title.toPlainText().splitlines() if t.strip()]
         self.store.save()
 
     def _apply_target(self, count: bool = True) -> None:
+        if self._busy_loading():
+            return
         s = self.store.settings
         s.target_title = self.ed_target_title.text().strip()
         s.target_exe = self.ed_target_exe.text().strip()
@@ -383,6 +459,8 @@ class SettingsPage(QWidget):
 
     # --------------------------------- меню Госволны и макрос (v3.5.0) --
     def _apply_gov_menu(self, *_a) -> None:
+        if self._busy_loading():
+            return
         s = self.store.settings
         s.gov_menu_enabled = bool(self.chk_gov_menu.isChecked())
         s.gov_menu_hotkey = self.ed_gov_menu.text().strip().lower() or "f7"
@@ -393,6 +471,8 @@ class SettingsPage(QWidget):
         self._emit_changed()
 
     def _apply_macro(self, *_a) -> None:
+        if self._busy_loading():
+            return
         s = self.store.settings
         s.gov_macro_enabled = bool(self.chk_macro.isChecked())
         s.gov_macro_hotkey = self.ed_macro.text().strip().lower() or "f8"
@@ -403,14 +483,27 @@ class SettingsPage(QWidget):
         self._emit_changed()
 
     def _apply_macro_misc(self, *_a) -> None:
+        if self._busy_loading():
+            return
         s = self.store.settings
         data = self.cb_macro_action.currentData()
         if data:
             s.gov_macro_action = data
         s.gov_macro_confirm_sec = int(self.sp_confirm.value())
         s.gov_macro_step_pause_ms = int(self.sp_pause.value())
+        s.gov_macro_press_enter = bool(self.chk_enter.isChecked())
         self.store.save()
         self._emit_changed()
+
+    # ---------------------------------------- уведомление о госволне (v3.7.0) --
+    def _apply_notify(self, *_a) -> None:
+        if self._busy_loading():
+            return
+        s = self.store.settings
+        s.gov_notify_enabled = bool(self.chk_notify.isChecked())
+        s.gov_notify_minutes = int(self.sp_notify_min.value())
+        s.normalize()
+        self.store.save()
 
     # --------------------------------------------------- сохранение кнопкой --
     def _save_all(self) -> None:
@@ -431,6 +524,7 @@ class SettingsPage(QWidget):
                 self._apply_gov_menu()
                 self._apply_macro()
                 self._apply_macro_misc()
+                self._apply_notify()
                 self._apply_tray(self.chk_tray.isChecked())
                 self._apply_wl(self.chk_wl.isChecked())
                 self._apply_wl_text()
@@ -537,6 +631,8 @@ class SettingsPage(QWidget):
             self.cb_tz.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _apply_tz(self) -> None:
+        if self._busy_loading():
+            return
         data = self.cb_tz.currentData()
         s = self.store.settings
         if data == "auto" or data is None:

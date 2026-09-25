@@ -23,8 +23,9 @@ from .. import APP_VERSION
 from .card import MIME_ENTRY, PhraseCard
 from .editor import TextEditorDialog
 from .flow_layout import FlowLayout
+from .gov_notify import GovNotifyToast
 from .gov_overlay import GovWaveOverlay, MacroConfirmDialog
-from .gov_wave import GovWavePage, plan_macro_sequence
+from .gov_wave import GovWavePage, gov_alert_state, now_in_tz, plan_macro_sequence
 from .settings import SettingsPage
 from .theme import build_qss
 from .widgets import SectionFrame, Toast
@@ -87,7 +88,7 @@ class MainWindow(QWidget):
         title = QLabel(f"{APP_NAME}")
         title.setObjectName("appTitle")
         h.addWidget(title)
-        sub = QLabel(f"v{APP_VERSION}  •  Enter не нажимается")
+        sub = QLabel(f"v{APP_VERSION}  •  Фразы: Enter сами  •  Макрос: Enter авто")
         sub.setObjectName("appSub")
         h.addWidget(sub)
         h.addStretch(1)
@@ -141,6 +142,14 @@ class MainWindow(QWidget):
         self._macro_dialog.confirmed.connect(self._macro_confirmed)
 
         self.toast = Toast(self)
+
+        # --- уведомление о госволне (v3.7.0): опрос времени каждые 5 с ---
+        self._gov_notify = GovNotifyToast()
+        self._gov_notified_keys: set[str] = set()
+        self._notify_timer = QTimer(self)
+        self._notify_timer.setInterval(5000)
+        self._notify_timer.timeout.connect(self._check_gov_notify)
+        self._notify_timer.start()
 
     def _build_library_page(self) -> QWidget:
         page = QWidget()
@@ -461,15 +470,18 @@ class MainWindow(QWidget):
             pause = 4000
         self._seq = list(plan)
         self._seq_i = 0
-        log(f"макрос: запуск последовательности из {len(self._seq)} шагов, пауза {pause} мс")
-        self._seq_step(pause)
+        pe = bool(getattr(self.store.settings, "gov_macro_press_enter", True))
+        log(f"макрос: запуск последовательности из {len(self._seq)} шагов, "
+            f"пауза {pause} мс, авто-Enter={'вкл' if pe else 'выкл'}")
+        self._seq_step(pause, pe)
 
-    def _seq_step(self, pause_ms: int) -> None:
+    def _seq_step(self, pause_ms: int, press_enter: bool = True) -> None:
         """Отправить текущий шаг последовательности и запланировать следующий.
 
-        Шаги отправляются через рабочий поток (UI не блокируется); между
-        шагами пауза по таймеру GUI-потока — пользователь успевает нажать
-        Enter в игре (Enter программой не нажимается).
+        Шаги отправляются через рабочий поток (UI не блокируется). v3.7.0:
+        если авто-Enter включён, рабочий поток после текста сам нажимает
+        Enter — сообщение уходит в чат и макрос идёт к следующему шагу.
+        Пауза между шагами — по таймеру GUI-потока.
         """
         if self._seq_i >= len(self._seq):
             log("макрос: последовательность завершена")
@@ -477,17 +489,51 @@ class MainWindow(QWidget):
             return
         n = len(self._seq)
         title, text = self._seq[self._seq_i]
-        self.show_toast(f"Макрос — шаг {self._seq_i + 1}/{n}: {title}")
-        log(f"макрос: шаг {self._seq_i + 1}/{n} — {title}")
-        self._worker.requested.emit(
+        tail = " (Enter нажмётся сам)" if press_enter else ""
+        self.show_toast(f"Макрос — шаг {self._seq_i + 1}/{n}{tail}: {title}")
+        log(f"макрос: шаг {self._seq_i + 1}/{n} — {title} (auto-enter={press_enter})")
+        self._worker.requested_seq.emit(
             TextEntry(
                 title=f"[ГВ-макрос {self._seq_i + 1}/{n}] {title}",
                 text=text, category="Госволна",
-            )
+            ),
+            bool(press_enter),
         )
         self._seq_i += 1
         if self._seq_i < len(self._seq):
-            QTimer.singleShot(max(500, pause_ms), lambda: self._seq_step(pause_ms))
+            QTimer.singleShot(max(500, pause_ms), lambda: self._seq_step(pause_ms, press_enter))
+
+    # ------------------------------------------- уведомление о госволне (v3.7.0) --
+    def _check_gov_notify(self) -> None:
+        """Опрос часов: за N минут до слота показать красное уведомление.
+
+        Дедупликация: один слот предупреждается ОДИН раз в сутки
+        (ключ «слот@дата»), даже если окно уведомления ещё висит.
+        """
+        try:
+            s = self.store.settings
+            if not getattr(s, "gov_notify_enabled", True):
+                return
+            st = gov_alert_state(s)
+            if not st:
+                return
+            slot, left = st
+            key = f"{slot}@{now_in_tz(s):%Y-%m-%d}"
+            if key in self._gov_notified_keys:
+                return
+            self._gov_notified_keys.add(key)
+            # держим множество маленьким (слоты меняются «Подшитать время»)
+            if len(self._gov_notified_keys) > 32:
+                self._gov_notified_keys.clear()
+                self._gov_notified_keys.add(key)
+            org = (getattr(s, "gov_org", "") or "").strip() or "LSCSD"
+            self._gov_notify.popup(
+                left, slot, org,
+                target_title=getattr(s, "target_title", "") or "",
+                target_exe=getattr(s, "target_exe", "") or "",
+            )
+        except Exception as e:
+            log(f"уведомление о госволне: ошибка {e}")
 
     def apply_extra_hotkeys(self) -> None:
         """(Пере)запустить клавиши меню Госволны и макроса по настройкам."""

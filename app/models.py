@@ -201,7 +201,11 @@ class Settings:
     gov_macro_confirm_sec: int = 5     # задержка кнопки «Да»
     # v3.6.0: макрос как ПОСЛЕДОВАТЕЛЬНОСТЬ шагов (собирается в меню F7)
     gov_macro_steps: List[str] = field(default_factory=lambda: ["step2"])
-    gov_macro_step_pause_ms: int = 4000  # пауза между шагами (Enter жмёт пользователь)
+    gov_macro_step_pause_ms: int = 4000  # пауза между шагами
+    # v3.7.0: авто-Enter после каждого шага макроса + уведомление о госволне
+    gov_macro_press_enter: bool = True  # после шага макрос само жмёт Enter
+    gov_notify_enabled: bool = True     # красное уведомление «скоро госволна»
+    gov_notify_minutes: int = 3         # за сколько минут до слота предупреждать
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -264,6 +268,14 @@ class Settings:
         except Exception:
             self.gov_macro_step_pause_ms = 4000
         self.gov_macro_step_pause_ms = max(500, min(30000, self.gov_macro_step_pause_ms))
+        # v3.7.0: авто-Enter макроса и уведомление о госволне
+        self.gov_macro_press_enter = bool(self.gov_macro_press_enter)
+        self.gov_notify_enabled = bool(self.gov_notify_enabled)
+        try:
+            self.gov_notify_minutes = int(self.gov_notify_minutes)
+        except Exception:
+            self.gov_notify_minutes = 3
+        self.gov_notify_minutes = max(1, min(30, self.gov_notify_minutes))
 
     def validate(self) -> List[str]:
         errs: List[str] = []

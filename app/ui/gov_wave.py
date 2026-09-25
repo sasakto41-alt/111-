@@ -186,6 +186,37 @@ def plan_macro_sequence(settings) -> List[Tuple[str, str]]:
     return out
 
 
+def gov_alert_state(settings, now: Optional[datetime] = None,
+                    minutes_before: Optional[int] = None
+                    ) -> Optional[Tuple[str, float]]:
+    """Уведомление о госволне (v3.7.0): пора ли предупреждать?
+
+    Опрашивается таймером каждые 5 секунд. Возвращает (слот, осталось_минут),
+    если до ближайшего слота (времени, которое подобрало приложение) осталось
+    НЕ БОЛЬШЕ settings.gov_notify_minutes — иначе None. Слоты, уже прошедшие
+    сегодня, игнорируются.
+    """
+    now = now or now_in_tz(settings)
+    if minutes_before is None:
+        try:
+            minutes_before = int(getattr(settings, "gov_notify_minutes", 3))
+        except Exception:
+            minutes_before = 3
+    minutes_before = max(1, min(30, int(minutes_before or 3)))
+    best: Optional[Tuple[str, float]] = None
+    for s in gov_slots_for(settings):
+        pm = _parse_hhmm(s)
+        if pm is None:
+            continue
+        t = now.replace(hour=pm[0], minute=pm[1], second=0, microsecond=0)
+        if t <= now:
+            continue                      # слот уже прошёл сегодня
+        left = (t - now).total_seconds() / 60.0
+        if left <= minutes_before + 1e-9 and (best is None or left < best[1]):
+            best = (s, left)
+    return best
+
+
 # ------------------------------------------------------------------- UI --
 class GovWavePage(QWidget):
     toast = Signal(str)            # сообщение в главное окно

@@ -111,20 +111,25 @@ class Sender(QObject):
         return 0
 
     # ----------------------------------------------------------------- send --
-    def send_text(self, entry: TextEntry) -> None:
-        """Точка входа из рабочего потока. С защитой от наложения отправок."""
+    def send_text(self, entry: TextEntry, press_enter: bool = False) -> None:
+        """Точка входа из рабочего потока. С защитой от наложения отправок.
+
+        press_enter=True (v3.7.0): после отправки сообщения нажать Enter —
+        используется ТОЛЬКО шагами макроса госволны (автоотправка включена
+        в настройках/меню F7). Обычные фразы Enter не нажимают.
+        """
         if self._busy:
             log("отправка: предыдущая ещё выполняется — запрос пропущен")
             return
         self._busy = True
         t0 = time.monotonic()
         try:
-            self._send_text_impl(entry)
+            self._send_text_impl(entry, bool(press_enter))
         finally:
             self._busy = False
             log(f"отправка завершена за {time.monotonic() - t0:.2f} с")
 
-    def _send_text_impl(self, entry: TextEntry) -> None:
+    def _send_text_impl(self, entry: TextEntry, press_enter: bool = False) -> None:
         settings = self._settings_getter()
         method = getattr(settings, "inject_method", "unicode") or "unicode"
         log(f"отправка «{entry.title or entry.text[:24]}»: способ={method}")
@@ -144,6 +149,10 @@ class Sender(QObject):
             self.copy_requested.emit(entry.text)
             time.sleep(0.3)                   # даём GUI-потоку положить в буфер
             focused = self._focus_game(settings, prev_hwnd)
+            if press_enter:
+                # в этом режиме сообщение ещё НЕ в чате (вы вставляете сами),
+                # поэтому авто-Enter опасен — не нажимаем и честно говорим
+                log("макрос: авто-Enter пропущен — режим «буфер» (вы вставляете сами)")
             if focused:
                 self.status.emit(
                     f"Скопировано: {entry.title or 'фраза'} — вы в игре. "
@@ -175,6 +184,12 @@ class Sender(QObject):
             injector.type_text_unicode(entry.text)
             log(f"ввод: напечатано посимвольно за {time.monotonic() - t1:.2f} с")
 
+        # --- v3.7.0: авто-Enter шага макроса (после сообщения — к следующему) --
+        if press_enter:
+            time.sleep(0.2)                # чат должен успеть принять текст
+            log("макрос: нажимаю Enter (автоотправка шага включена)")
+            injector.press_enter()
+
         self.status.emit(f"Отправлено: {entry.title or entry.text[:32]}")
         self.used.emit(entry.id)
 
@@ -183,16 +198,28 @@ class SendWorker(QObject):
     """Мост: отправка выполняется в рабочем потоке, UI не блокируется."""
 
     requested = Signal(object)
+    requested_seq = Signal(object, bool)   # v3.7.0: (запись, press_enter)
 
     def __init__(self, sender: Sender, parent=None):
         super().__init__(parent)
         self.sender = sender
         self.requested.connect(self.send)
+        self.requested_seq.connect(self.send_seq)
 
     @Slot(object)
     def send(self, entry: TextEntry) -> None:
         try:
             self.sender.send_text(entry)
+        except Exception as e:
+            try:
+                self.sender.status.emit(f"Ошибка отправки: {e}")
+            except Exception:
+                pass
+
+    @Slot(object, bool)
+    def send_seq(self, entry: TextEntry, press_enter: bool) -> None:
+        try:
+            self.sender.send_text(entry, press_enter=press_enter)
         except Exception as e:
             try:
                 self.sender.status.emit(f"Ошибка отправки: {e}")
