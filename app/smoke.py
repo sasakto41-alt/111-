@@ -47,9 +47,17 @@ def run_smoke() -> int:
           hasattr(s, "target_title") and hasattr(s, "target_exe"))
     check("Settings.gov_* существуют",
           hasattr(s, "gov_org") and hasattr(s, "gov_gnews_paleto") and hasattr(s, "gov_last_slots"))
-    d = s.to_dict()
-    s2 = models.Settings.from_dict({**d, "gov_org": "LSPD", "unknown_field": 1})
+    check("пояс: gov_tz_auto/gov_utc_offset существуют",
+          hasattr(s, "gov_tz_auto") and hasattr(s, "gov_utc_offset"))
+    s2 = models.Settings.from_dict({**s.to_dict(), "gov_org": "LSPD", "unknown_field": 1})
     check("Settings roundtrip + игнор неизвестных полей", s2.gov_org == "LSPD")
+    s3 = models.Settings.from_dict({"gov_tz_auto": False, "gov_utc_offset": 3.0})
+    check("настройки пояса roundtrip",
+          s3.gov_tz_auto is False and abs(s3.gov_utc_offset - 3.0) < 1e-6)
+    tz = models.timezone_options()
+    check("timezone_options: полный диапазон",
+          tz[0][0] == -12.0 and tz[-1][0] == 14.0 and len(tz) > 30)
+    check("timezone_options: отсортирован", all(tz[i][0] < tz[i + 1][0] for i in range(len(tz) - 1)))
 
     # 5. Госволна: чистые функции
     from datetime import datetime, timedelta
@@ -134,6 +142,18 @@ def run_smoke() -> int:
             check("страница «Госволна» строится", gw is not None)
             fields = [gw.cmd_fields[k].text() for k in gw.cmd_fields]
             check("команды на странице заполнены", all(fields) and len(fields) == 5)
+            # часовой пояс: ручной режим UTC+3
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+            st.settings.gov_tz_auto = False
+            st.settings.gov_utc_offset = 3.0
+            gw.refresh_settings()
+            now_manual = gw._now()
+            expected = _dt.now(_tz.utc).replace(tzinfo=None) + _td(hours=3)
+            delta_min = abs((now_manual - expected).total_seconds()) / 60.0
+            check("gov page: ручной пояс UTC+3 ≈ UTC-время + 3 ч", delta_min < 5)
+            check("gov page: индикатор пояса обновился", "UTC+3" in gw.lbl_tz.text())
+            st.settings.gov_tz_auto = True
             sp = SettingsPage(st)
             check("страница настроек строится", sp is not None)
             check("в настройках есть способ «copy»",

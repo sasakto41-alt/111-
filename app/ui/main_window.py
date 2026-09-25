@@ -339,6 +339,10 @@ class MainWindow(QWidget):
         s = self.store.settings
         self.hotkeys.start(s.menu_hotkey)
         self.hotkeys.set_entries(self.store.entries)
+        try:
+            self._gov_page.refresh_settings()
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- misc --
     def eventFilter(self, obj, event) -> bool:  # noqa: N802

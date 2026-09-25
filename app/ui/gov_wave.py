@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTime, QTimer, QUrl, Signal
@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QScrollArea, QTimeEdit, QVBoxLayout, QWidget,
 )
 
-from ..models import DISCORD_ANNOUNCE_URL, GNEWS_PALETO, GNEWS_SANDY, TextEntry
+from ..models import DISCORD_ANNOUNCE_URL, GNEWS_PALETO, GNEWS_SANDY
 from .theme import DANGER, MUTED, OK
 from .widgets import SectionFrame
 
@@ -172,6 +172,9 @@ class GovWavePage(QWidget):
         self.lbl_validation = QLabel("")
         self.lbl_validation.setWordWrap(True)
         sec_time.body_layout().addWidget(self.lbl_validation)
+        self.lbl_tz = QLabel("")
+        self.lbl_tz.setObjectName("hint")
+        sec_time.body_layout().addWidget(self.lbl_tz)
         v.addWidget(sec_time)
 
         # -------------------------------------------------------- команды --
@@ -283,12 +286,24 @@ class GovWavePage(QWidget):
         self._regen()
 
     # ------------------------------------------------------------ settings --
+    # ----------------------------------------------------------------- время --
+    def _now(self) -> datetime:
+        """Текущее время в выбранном поясе (или время компьютера)."""
+        s = self.store.settings
+        if getattr(s, "gov_tz_auto", True):
+            return datetime.now()
+        try:
+            off = float(getattr(s, "gov_utc_offset", 0.0) or 0.0)
+        except Exception:
+            off = 0.0
+        return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=off)
+
     def _load_settings(self) -> None:
         s = self.store.settings
         self.ed_org.setText(s.gov_org or "LSCSD")
         slots = [x for x in (s.gov_last_slots or "").split() if _parse_hhmm(x)]
         if len(slots) != 3:
-            slots = suggest_slots()
+            slots = suggest_slots(self._now())
         for te, val in zip(self.time_edits, slots[:3]):
             pm = _parse_hhmm(val)
             if pm:
@@ -324,7 +339,7 @@ class GovWavePage(QWidget):
         return out
 
     def _auto_slots(self) -> None:
-        slots = suggest_slots()
+        slots = suggest_slots(self._now())
         for te, val in zip(self.time_edits, slots):
             pm = _parse_hhmm(val)
             if pm:
@@ -343,7 +358,22 @@ class GovWavePage(QWidget):
 
     def _regen(self) -> None:
         slots = self._current_slots()
-        warns = validate_slots(slots)
+        warns = validate_slots(slots, self._now())
+        s = self.store.settings
+        if getattr(s, "gov_tz_auto", True):
+            self.lbl_tz.setText(
+                f"Используется время компьютера: {datetime.now():%H:%M} — "
+                "пояс сервера можно сменить в Настройках"
+            )
+        else:
+            try:
+                off = float(s.gov_utc_offset or 0.0)
+            except Exception:
+                off = 0.0
+            self.lbl_tz.setText(
+                f"Выбран пояс UTC{off:+g}: сейчас {self._now():%H:%M} по нему — "
+                "слоты подбираются по этому времени"
+            )
         if warns:
             self.lbl_validation.setStyleSheet(f"color: {DANGER};")
             self.lbl_validation.setText("⚠ " + "  •  ".join(warns))

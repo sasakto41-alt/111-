@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import window_utils
-from ..models import INJECT_HINTS, INJECT_LABELS, INJECT_METHODS
+from ..models import INJECT_HINTS, INJECT_LABELS, INJECT_METHODS, timezone_options
 from .theme import MUTED, OK
 from .widgets import SectionFrame
 
@@ -98,6 +98,25 @@ class SettingsPage(QWidget):
         sec_target.body_layout().addWidget(self.lbl_target_status)
         v.addWidget(sec_target)
 
+        # ---------------------------------------------------- часовой пояс --
+        sec_tz = SectionFrame("Часовой пояс госволны")
+        h_tz = QHBoxLayout()
+        h_tz.addWidget(QLabel("Подбор времени:"))
+        self.cb_tz = QComboBox()
+        self.cb_tz.addItem("Как на компьютере (местное время)", "auto")
+        for _off, _label in timezone_options():
+            self.cb_tz.addItem(_label, _off)
+        h_tz.addWidget(self.cb_tz, 1)
+        sec_tz.body_layout().addLayout(h_tz)
+        lbl_tz_hint = QLabel(
+            "Влияет на кнопку «Подобрать время» и проверку правил в разделе «Госволна». "
+            "Если сервер живёт по другому времени — выберите его пояс, например UTC+0."
+        )
+        lbl_tz_hint.setObjectName("hint")
+        lbl_tz_hint.setWordWrap(True)
+        sec_tz.body_layout().addWidget(lbl_tz_hint)
+        v.addWidget(sec_tz)
+
         # ------------------------------------------------------------ трей --
         sec_tray = SectionFrame("Трей")
         self.chk_tray = QCheckBox("Иконка в трее и уведомления (когда окно скрыто)")
@@ -143,6 +162,7 @@ class SettingsPage(QWidget):
         self.txt_wl_title.textChanged.connect(self._apply_wl_text)
         self.ed_target_title.editingFinished.connect(self._apply_target)
         self.ed_target_exe.editingFinished.connect(self._apply_target)
+        self.cb_tz.currentIndexChanged.connect(self._apply_tz)
 
         self._capture_timer = QTimer(self)
         self._capture_timer.setSingleShot(True)
@@ -165,6 +185,7 @@ class SettingsPage(QWidget):
         self.txt_wl_title.setPlainText("\n".join(s.whitelist_titles))
         self.ed_target_title.setText(s.target_title)
         self.ed_target_exe.setText(s.target_exe)
+        self._load_tz()
 
     # ---------------------------------------------------------------- apply --
     def _apply_keys(self) -> None:
@@ -217,6 +238,32 @@ class SettingsPage(QWidget):
     def _update_inject_hint(self) -> None:
         m = self.cb_inject.currentData() or "unicode"
         self.lbl_inject_hint.setText(INJECT_HINTS.get(m, ""))
+
+    # ------------------------------------------------------- часовой пояс --
+    def _load_tz(self) -> None:
+        s = self.store.settings
+        if getattr(s, "gov_tz_auto", True):
+            self.cb_tz.setCurrentIndex(0)
+        else:
+            try:
+                off = float(s.gov_utc_offset or 0.0)
+            except Exception:
+                off = 0.0
+            idx = self.cb_tz.findData(off)
+            self.cb_tz.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def _apply_tz(self) -> None:
+        data = self.cb_tz.currentData()
+        s = self.store.settings
+        if data == "auto" or data is None:
+            s.gov_tz_auto = True
+        else:
+            s.gov_tz_auto = False
+            try:
+                s.gov_utc_offset = float(data)
+            except Exception:
+                s.gov_utc_offset = 0.0
+        self.store.save()
 
     # -------------------------------------------------------------- capture --
     def _start_capture(self, which: str) -> None:

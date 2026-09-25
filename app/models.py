@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field, asdict, fields
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 CATEGORIES: List[str] = ["Общение", "РП-отыгровки", "Команды", "Госволна", "Разное"]
 
@@ -121,6 +121,22 @@ GNEWS_SANDY = (
 )
 
 
+# ------------------------------------------------------------------- ЧАСОВОЙ ПОЯС --
+_TZ_EXTRA = {
+    -3.5: "UTC-3:30", 3.5: "UTC+3:30", 4.5: "UTC+4:30", 5.5: "UTC+5:30",
+    5.75: "UTC+5:45", 6.5: "UTC+6:30", 9.5: "UTC+9:30", 10.5: "UTC+10:30",
+    12.75: "UTC+12:45",
+}
+
+
+def timezone_options() -> List[Tuple[float, str]]:
+    """Список (offset_часов, подпись) для выбора пояса госволны."""
+    opts = [(float(h), "UTC+0" if h == 0 else f"UTC{h:+d}") for h in range(-12, 15)]
+    opts.extend(_TZ_EXTRA.items())
+    opts.sort(key=lambda p: p[0])
+    return opts
+
+
 @dataclass
 class Settings:
     menu_hotkey: str = "f6"
@@ -139,6 +155,8 @@ class Settings:
     gov_last_slots: str = ""      # "15:00 15:20 15:40"
     gov_gnews_paleto: str = ""    # "" → шаблон по умолчанию
     gov_gnews_sandy: str = ""
+    gov_tz_auto: bool = True      # True — время компьютера; False — ручной пояс
+    gov_utc_offset: float = 0.0   # UTC±X, когда gov_tz_auto=False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -166,6 +184,12 @@ class Settings:
             self.whitelist_exes = []
         if not isinstance(self.whitelist_titles, list):
             self.whitelist_titles = []
+        try:
+            self.gov_utc_offset = float(self.gov_utc_offset)
+        except Exception:
+            self.gov_utc_offset = 0.0
+        self.gov_utc_offset = max(-12.0, min(14.0, self.gov_utc_offset))
+        self.gov_tz_auto = bool(self.gov_tz_auto)
 
     def validate(self) -> List[str]:
         errs: List[str] = []
