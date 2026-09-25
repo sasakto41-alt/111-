@@ -9,17 +9,19 @@ from PySide6.QtWidgets import (
 
 from .. import window_utils
 from ..models import INJECT_HINTS, INJECT_LABELS, INJECT_METHODS, timezone_options
-from .theme import MUTED, OK
+from .theme import DANGER, MUTED, OK
 from .widgets import SectionFrame
 
 
 class SettingsPage(QWidget):
     settings_changed = Signal()   # после любого изменения
+    key_test_hit = Signal()       # нажатие меню-клавиши в режиме теста (из фонового потока)
 
     def __init__(self, store, parent=None):
         super().__init__(parent)
         self.store = store
         self._capture_target: str | None = None
+        self._hotkeys = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -32,6 +34,26 @@ class SettingsPage(QWidget):
         v = QVBoxLayout(root)
         v.setContentsMargins(18, 14, 18, 18)
         v.setSpacing(12)
+
+        # -------------------------------------------- сохранение настроек --
+        sec_save = SectionFrame("Сохранение настроек")
+        h_save = QHBoxLayout()
+        self.btn_save = QPushButton("💾 Сохранить настройки")
+        self.btn_save.setObjectName("primary")
+        self.btn_save.setToolTip(
+            "Применяет ВСЕ поля этой страницы и записывает в data/data.json"
+        )
+        self.btn_save.clicked.connect(self._save_all)
+        h_save.addWidget(self.btn_save)
+        self.lbl_save = QLabel(
+            "Изменения применяются сразу, а кнопка принудительно сохраняет всё "
+            "и проверяет корректность — нажмите её после правки хоткеев."
+        )
+        self.lbl_save.setObjectName("hint")
+        self.lbl_save.setWordWrap(True)
+        h_save.addWidget(self.lbl_save, 1)
+        sec_save.body_layout().addLayout(h_save)
+        v.addWidget(sec_save)
 
         # ---------------------------------------------------------- хоткеи --
         sec_keys = SectionFrame("Горячие клавиши")
@@ -53,6 +75,26 @@ class SettingsPage(QWidget):
         self.lbl_keys_hint.setObjectName("hint")
         self.lbl_keys_hint.setWordWrap(True)
         sec_keys.body_layout().addWidget(self.lbl_keys_hint)
+        self.lbl_hk_state = QLabel("Перехват клавиш: ещё не запущен (нажмите «Сохранить настройки»)")
+        self.lbl_hk_state.setObjectName("hint")
+        self.lbl_hk_state.setWordWrap(True)
+        sec_keys.body_layout().addWidget(self.lbl_hk_state)
+        h_test = QHBoxLayout()
+        self.btn_test_key = QPushButton("Проверить меню-клавишу (10 с)")
+        self.btn_test_key.setToolTip(
+            "Нажмите клавишу меню (например F6) в любом окне — программа покажет, доходит ли нажатие"
+        )
+        self.btn_test_key.clicked.connect(self._start_key_test)
+        h_test.addWidget(self.btn_test_key)
+        h_test.addStretch(1)
+        sec_keys.body_layout().addLayout(h_test)
+        self.lbl_key_test = QLabel("")
+        self.lbl_key_test.setWordWrap(True)
+        sec_keys.body_layout().addWidget(self.lbl_key_test)
+        self._test_timer = QTimer(self)
+        self._test_timer.setSingleShot(True)
+        self._test_timer.timeout.connect(self._key_test_timeout)
+        self.key_test_hit.connect(self._do_key_test_hit)
         v.addWidget(sec_keys)
 
         # -------------------------------------------------- способ вставки --
@@ -238,6 +280,105 @@ class SettingsPage(QWidget):
     def _update_inject_hint(self) -> None:
         m = self.cb_inject.currentData() or "unicode"
         self.lbl_inject_hint.setText(INJECT_HINTS.get(m, ""))
+
+    # --------------------------------------------------- сохранение кнопкой --
+    def _save_all(self) -> None:
+        """Кнопка «Сохранить настройки»: применить все поля и записать файл."""
+        try:
+            self._apply_keys()
+            self._apply_delay(self.sp_delay.value())
+            self._apply_inject()
+            self._apply_target()
+            self._apply_tz()
+            self._apply_tray(self.chk_tray.isChecked())
+            self._apply_wl(self.chk_wl.isChecked())
+            self._apply_wl_text()
+            self.store.save()
+            errs = self.store.settings.validate()
+            if errs:
+                self.lbl_save.setStyleSheet(f"color: {DANGER};")
+                self.lbl_save.setText("⚠ Сохранено с предупреждениями: " + "; ".join(errs))
+            else:
+                from datetime import datetime as _dt
+
+                self.lbl_save.setStyleSheet(f"color: {OK};")
+                self.lbl_save.setText(
+                    f"✓ Настройки сохранены ({_dt.now():%H:%M:%S}) — хоткеи перезапущены"
+                )
+            self.settings_changed.emit()
+        except Exception as e:
+            self.lbl_save.setStyleSheet(f"color: {DANGER};")
+            self.lbl_save.setText(f"Ошибка сохранения: {e}")
+
+    # --------------------------------------------- хоткеи: статус и тест --
+    def set_hotkeys(self, hk) -> None:
+        """Подключить HotkeyManager (вызывается из главного окна)."""
+        self._hotkeys = hk
+        if hk is not None:
+            hk.state_changed.connect(self._on_hk_state)
+
+    def _on_hk_state(self, _state: str) -> None:
+        hk = self._hotkeys
+        if hk is None:
+            return
+        if hk.error:
+            self.lbl_hk_state.setStyleSheet(f"color: {DANGER};")
+            self.lbl_hk_state.setText(f"Перехват клавиш: ОШИБКА — {hk.error}")
+        else:
+            self.lbl_hk_state.setStyleSheet(f"color: {OK};")
+            self.lbl_hk_state.setText(
+                "Перехват клавиш активен (опрос клавиатуры — работает и в игре, "
+                "и при игре от администратора, без системных хуков)."
+            )
+
+    def _show_key_test(self, text: str, color: str) -> None:
+        self.lbl_key_test.setStyleSheet(f"color: {color};")
+        self.lbl_key_test.setText(text)
+
+    def _start_key_test(self) -> None:
+        hk = self._hotkeys
+        if hk is None:
+            self._show_key_test(
+                "Хоткеи ещё не запущены — сначала нажмите «Сохранить настройки».", DANGER
+            )
+            return
+        if not hk.start_menu_test(self._on_key_test_hit):
+            self._show_key_test(
+                "Меню-клавиша не активна (ошибка регистрации). Проверьте клавишу "
+                "и нажмите «Сохранить настройки».", DANGER,
+            )
+            return
+        key = (self.ed_menu.text().strip() or "F6").upper()
+        self.btn_test_key.setEnabled(False)
+        self._show_key_test(
+            f"Ожидание нажатия {key}… нажмите её в любом окне (10 секунд).", MUTED
+        )
+        self._test_timer.start(10000)
+
+    def _on_key_test_hit(self) -> None:
+        """Вызывается из фонового потока опроса — маршируем в GUI-поток."""
+        self.key_test_hit.emit()
+
+    def _do_key_test_hit(self) -> None:
+        if self._hotkeys is not None:
+            self._hotkeys.stop_menu_test()
+        self._test_timer.stop()
+        self.btn_test_key.setEnabled(True)
+        self._show_key_test(
+            "✓ Клавиша дошла до программы! Перехват работает — F6 будет открывать меню.",
+            OK,
+        )
+
+    def _key_test_timeout(self) -> None:
+        if self._hotkeys is not None:
+            self._hotkeys.stop_menu_test()
+        self.btn_test_key.setEnabled(True)
+        self._show_key_test(
+            "✗ За 10 секунд нажатие не пришло. Возможные причины: эту клавишу заняла "
+            "другая программа; вы нажали не ту клавишу, что указана в поле «Меню»; "
+            "игра в полноэкранном эксклюзивном режиме — переключите её в «окно без рамки».",
+            DANGER,
+        )
 
     # ------------------------------------------------------- часовой пояс --
     def _load_tz(self) -> None:

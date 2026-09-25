@@ -118,6 +118,7 @@ class MainWindow(QWidget):
         self.stack.addWidget(self._gov_page)
         self._settings_page = SettingsPage(self.store)
         self._settings_page.settings_changed.connect(self._on_settings_changed)
+        self._settings_page.set_hotkeys(self.hotkeys)
         self.stack.addWidget(self._settings_page)
         self.switch_page(PAGE_LIBRARY)
 

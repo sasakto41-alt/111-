@@ -199,14 +199,15 @@ def run_smoke() -> int:
     except Exception as e:
         check(f"UI: {type(e).__name__}: {e}", False)
 
-    # 10. Надёжный запуск v3.3.0: журнал + повторный запуск
+    # 10. Надёжный запуск: журнал + повторный запуск
     try:
         import main as _m
 
         check("main: модуль запуска импортируется", callable(_m.main))
-        _m.log("smoke-проверка журнала")
-        check("main: журнал пишется на диск",
-              bool(_m.LOG_PATH) and Path(_m.LOG_PATH).exists())
+        from app import journal as _j
+
+        _j.log("smoke-проверка журнала")
+        check("main: журнал пишется на диск", bool(_j.path) and Path(_j.path).exists())
         check("main: show_box/fatal доступны",
               callable(_m.show_box) and callable(_m._fatal) and _m._app_version() == _ver)
         from PySide6.QtCore import QLockFile
@@ -220,7 +221,59 @@ def run_smoke() -> int:
         check("QLockFile: второй экземпляр блокируется", not l2.tryLock(300))
         l1.unlock()
     except Exception as e:
-        check(f"запуск v3.3.0: {type(e).__name__}: {e}", False)
+        check(f"запуск: {type(e).__name__}: {e}", False)
+
+    # 11. Хоткеи v3.4.0: VK-раскладка и опрос меню-клавиши
+    try:
+        import sys as _sys
+
+        from app.hotkeys import HotkeyManager, combo_groups, vk_for_key
+
+        check("vk_for_key('f6') == 0x75", vk_for_key("f6") == 0x75)
+        check("vk_for_key('t') == 0x54", vk_for_key("t") == 0x54)
+        check("vk_for_key('ctrl') == 0x11", vk_for_key("ctrl") == 0x11)
+        check("combo_groups('f6') == [(0x75,)]", combo_groups("f6") == [(0x75,)])
+        check("combo_groups('ctrl+1')", combo_groups("ctrl+1") == [(0x11,), (0x31,)])
+        check("combo_groups('win+f6') — LWIN или RWIN",
+              combo_groups("win+f6") == [(0x5B, 0x5C), (0x75,)])
+        check("combo_groups('привет') == [] (неизвестное отбрасывается)",
+              combo_groups("привет") == [])
+        hm = HotkeyManager()
+        hm.start("f6")
+        check("меню-клавиша: старт без исключений", True)
+        if _sys.platform == "win32":
+            check("меню-клавиша активна (опрос)", hm.is_menu_active() and hm.error == "")
+        else:
+            check("вне Windows хук может не запуститься (не ошибка)", True)
+        check("тест-режим включается при активной клавише",
+              hm.start_menu_test(lambda: None) == hm.is_menu_active())
+        hm.stop()
+        check("stop() останавливает перехват", not hm.is_menu_active())
+    except Exception as e:
+        check(f"хоткеи v3.4.0: {type(e).__name__}: {e}", False)
+
+    # 12. Кнопка сохранения настроек и тест меню-клавиши на странице
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        if QApplication.instance() is None:
+            QApplication([])
+        with tempfile.TemporaryDirectory() as td:
+            st = Store(path=Path(td) / "d.json")
+            from app.ui.settings import SettingsPage
+
+            sp = SettingsPage(st)
+            check("кнопка «Сохранить настройки» есть", hasattr(sp, "btn_save"))
+            check("кнопка «Проверить меню-клавишу» есть", hasattr(sp, "btn_test_key"))
+            sp._save_all()
+            check("сохранение кнопкой не падает и пишет файл",
+                  (Path(td) / "d.json").exists())
+            hm2 = HotkeyManager()
+            sp.set_hotkeys(hm2)
+            check("set_hotkeys: статус перехвата показан", bool(sp.lbl_hk_state.text()))
+            hm2.stop()
+    except Exception as e:
+        check(f"настройки v3.4.0: {type(e).__name__}: {e}", False)
 
     return _finish()
 

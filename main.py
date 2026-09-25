@@ -19,57 +19,35 @@
 """
 from __future__ import annotations
 
-import datetime
-import faulthandler
 import os
 import sys
 
 if "--smoke" in sys.argv and not os.getenv("QT_QPA_PLATFORM"):
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-_LOG_FH = None
-LOG_PATH = ""
+try:
+    # журнал — только stdlib, работает даже если PySide6 сломан
+    from app import journal as _journal
 
+    def log(msg: str) -> None:
+        _journal.log(msg)
 
-def _log_candidates():
-    out = []
-    try:
-        if getattr(sys, "frozen", False):
-            out.append(os.path.join(os.path.dirname(sys.executable), "error.log"))
-        root = os.path.dirname(os.path.abspath(__file__))
-        out.append(os.path.join(root, "data", "error.log"))
-    except Exception:
-        pass
-    appdata = os.getenv("APPDATA") or os.path.expanduser("~")
-    out.append(os.path.join(appdata, "MajesticTextHelper", "error.log"))
-    return out
+    def show_box(text: str, error: bool = True) -> None:
+        _journal.show_box(text, error)
 
+    def _log_path() -> str:
+        return _journal.path
 
-def log(msg: str) -> None:
-    """Аварийное журналирование: работает даже если Qt/приложение сломаны."""
-    global _LOG_FH, LOG_PATH
-    try:
-        if _LOG_FH is None:
-            for p in _log_candidates():
-                try:
-                    d = os.path.dirname(p)
-                    if d:
-                        os.makedirs(d, exist_ok=True)
-                    fh = open(p, "a", encoding="utf-8", errors="replace")
-                except Exception:
-                    continue
-                _LOG_FH, LOG_PATH = fh, p
-                fh.write(
-                    f"\n=== Запуск {datetime.datetime.now():%Y-%m-%d %H:%M:%S} "
-                    f"(Python {sys.version.split()[0]}, "
-                    f"frozen={getattr(sys, 'frozen', False)}) ===\n"
-                )
-                break
-        if _LOG_FH is not None:
-            _LOG_FH.write(f"[{datetime.datetime.now():%H:%M:%S}] {msg}\n")
-            _LOG_FH.flush()
-    except Exception:
-        pass
+except Exception:  # супер-резерв: повреждён даже пакет app
+
+    def log(msg: str) -> None:
+        print(msg, file=sys.stderr)
+
+    def show_box(text: str, error: bool = True) -> None:
+        print(text, file=sys.stderr)
+
+    def _log_path() -> str:
+        return ""
 
 
 def _app_version() -> str:
@@ -81,24 +59,13 @@ def _app_version() -> str:
         return "?"
 
 
-def show_box(text: str, error: bool = True) -> None:
-    """Окно с сообщением через WinAPI — показывается, даже если Qt сломан."""
-    try:
-        import ctypes
-
-        flags = 0x10 if error else 0x40  # MB_ICONERROR / MB_ICONINFORMATION
-        ctypes.windll.user32.MessageBoxW(None, text, "Majestic Text Helper", flags)
-    except Exception:
-        pass
-
-
 def _fatal(where: str, err: str) -> None:
     log(f"FATAL ({where}):\n{err}")
     tail = "\n".join(err.strip().splitlines()[-8:])
     show_box(
         "Программа не смогла запуститься.\n\n"
         f"Этап: {where}\n\n{tail}\n\n"
-        f"Полный отчёт: {LOG_PATH or 'error.log (рядом с программой)'}\n"
+        f"Полный отчёт: {_log_path() or 'error.log (рядом с программой)'}\n"
         "Пришлите этот файл разработчику."
     )
 
@@ -142,7 +109,7 @@ def _diag() -> int:
     except Exception as e:
         lines.append(f"Папка данных: ошибка — {e}")
     log("диагностика (--diag):\n" + "\n".join(lines))
-    text = "\n".join(lines) + f"\n\nЖурнал: {LOG_PATH or 'error.log'}"
+    text = "\n".join(lines) + f"\n\nЖурнал: {_log_path() or 'error.log'}"
     print(text)
     show_box(text, error=False)
     return 0
@@ -164,10 +131,7 @@ def main() -> int:
 
     # faulthandler — как можно раньше, в тот же журнал
     try:
-        if _LOG_FH is None:
-            log("инициализация журнала")
-        if _LOG_FH is not None:
-            faulthandler.enable(_LOG_FH)
+        _journal.enable_faulthandler()
     except Exception:
         pass
 

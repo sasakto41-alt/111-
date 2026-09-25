@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 title Majestic Text Helper - сборка EXE
-echo === Majestic Text Helper: сборка (v3.3.0) ===
+echo === Majestic Text Helper: сборка (v3.4.0) ===
 echo.
 cd /d "%~dp0"
 
