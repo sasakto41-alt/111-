@@ -196,6 +196,9 @@ def main() -> int:
         # v3.5.0: клавиши отдельного меню Госволны и макроса
         hotkeys.gov_toggled.connect(win.toggle_gov_overlay)
         hotkeys.macro_triggered.connect(win.show_macro_confirm)
+        # v3.10.0: F9-цикл «госволна → одобрение → скриншот → Discord»
+        hotkeys.discord_triggered.connect(win.show_discord_confirm)
+        hotkeys.cancel_triggered.connect(win.cancel_discord_wait)
         hotkeys.start(store.settings.menu_hotkey)
         win.apply_extra_hotkeys()
         hotkeys.set_entries(store.entries)

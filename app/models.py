@@ -216,6 +216,14 @@ class Settings:
     overlay_pos_y: int = -1
     gov_pos_x: int = -1                 # запомненная позиция меню Госволны (F7)
     gov_pos_y: int = -1
+    # v3.10.0: F9-цикл «госволна → одобрение → скриншот → Discord»
+    discord_hotkey: str = "f9"          # клавиша запуска полного цикла
+    discord_cancel_hotkey: str = "f10"  # отмена ожидания одобрения
+    discord_wave_counter: int = 0       # номер последнего ОТПРАВЛЕННОГО объявления
+    discord_wave_total: int = 13        # знаменатель в «N/13»
+    discord_msg_template: str = "Госволна {N}"  # {N} → «4/13»
+    discord_timeout_min: int = 5        # сколько ждать одобрения (1..30)
+    discord_webhook: str = ""           # запасная отправка, если окно Discord не найдено
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -308,6 +316,32 @@ class Settings:
             # -1 = авто-позиция; остальное — запомненные координаты
             # (не ограничиваем: у вторых мониторов бывают отрицательные X/Y)
             setattr(self, _attr, _v)
+        # v3.10.0: Discord-цикл F9
+        self.discord_hotkey = normalize_hotkey(to_latin_key(self.discord_hotkey)) or "f9"
+        self.discord_cancel_hotkey = (
+            normalize_hotkey(to_latin_key(self.discord_cancel_hotkey)) or "f10"
+        )
+        try:
+            self.discord_wave_counter = int(self.discord_wave_counter)
+        except Exception:
+            self.discord_wave_counter = 0
+        self.discord_wave_counter = max(0, min(999, self.discord_wave_counter))
+        try:
+            self.discord_wave_total = int(self.discord_wave_total)
+        except Exception:
+            self.discord_wave_total = 13
+        self.discord_wave_total = max(1, min(99, self.discord_wave_total))
+        if not isinstance(self.discord_msg_template, str) or not self.discord_msg_template.strip():
+            self.discord_msg_template = "Госволна {N}"
+        self.discord_msg_template = self.discord_msg_template.strip()
+        try:
+            self.discord_timeout_min = int(self.discord_timeout_min)
+        except Exception:
+            self.discord_timeout_min = 5
+        self.discord_timeout_min = max(1, min(30, self.discord_timeout_min))
+        if not isinstance(self.discord_webhook, str):
+            self.discord_webhook = ""
+        self.discord_webhook = self.discord_webhook.strip()
 
     def validate(self) -> List[str]:
         errs: List[str] = []
@@ -332,4 +366,30 @@ class Settings:
                     errs.append("клавиша макроса совпадает с клавишей основного меню")
                 elif self.gov_menu_enabled and _mk == normalize_hotkey(self.gov_menu_hotkey):
                     errs.append("клавиша макроса совпадает с клавишей меню Госволны")
+        # v3.10.0: клавиши F9-цикла и отмены ожидания не должны конфликтовать
+        if not is_valid_hotkey(self.discord_hotkey):
+            errs.append("клавиша F9-цикла некорректна (F1–F24 или ctrl/alt/shift+клавиша)")
+        if not is_valid_hotkey(self.discord_cancel_hotkey):
+            errs.append("клавиша отмены ожидания некорректна")
+        _taken = {normalize_hotkey(self.menu_hotkey)}
+        if self.gov_menu_enabled:
+            _taken.add(normalize_hotkey(self.gov_menu_hotkey))
+        if self.gov_macro_enabled:
+            _taken.add(normalize_hotkey(self.gov_macro_hotkey))
+        _dk = normalize_hotkey(self.discord_hotkey)
+        _ck = normalize_hotkey(self.discord_cancel_hotkey)
+        if _dk in _taken:
+            errs.append("клавиша F9-цикла совпадает с другой меню-клавишей")
+        if _ck in _taken or _ck == _dk:
+            errs.append("клавиша отмены ожидания совпадает с другой меню-клавишей")
         return errs
+
+
+def format_discord_message(settings, number: int) -> str:
+    """Текст сообщения Discord: «Госволна 4/13» (шаблон из настроек, v3.10.0)."""
+    tmpl = (getattr(settings, "discord_msg_template", "") or "").strip() or "Госволна {N}"
+    try:
+        total = int(getattr(settings, "discord_wave_total", 13) or 13)
+    except Exception:
+        total = 13
+    return tmpl.replace("{N}", f"{int(number)}/{total}")

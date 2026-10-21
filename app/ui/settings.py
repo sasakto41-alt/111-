@@ -3,15 +3,16 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
     QVBoxLayout, QWidget,
 )
 
-from .. import porting, window_utils
+from .. import ocr_watch, porting, window_utils
 from ..models import (
     GOV_MACRO_ACTIONS, GOV_MACRO_LABELS, INJECT_HINTS, INJECT_LABELS,
     INJECT_METHODS, timezone_options,
@@ -20,9 +21,35 @@ from .theme import DANGER, MUTED, OK
 from .widgets import SectionFrame
 
 
+class _AsyncRunner(QObject):
+    """Одноразовый фоновый запуск функции с возвратом результата в GUI-поток.
+
+    Используется кнопками «Проверить OCR» и «Тест вебхука» — сами проверки
+    медленные (PowerShell / сеть), и гонять их в GUI-потоке запрещено
+    (принцип анти-фриза v3.6.0).
+    """
+
+    done = Signal(object)   # (ok: bool, result)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def start(self) -> None:
+        threading.Thread(target=self._work, name="MTH-async-run", daemon=True).start()
+
+    def _work(self) -> None:
+        try:
+            res = (True, self._fn())
+        except Exception as e:
+            res = (False, f"{type(e).__name__}: {e}")
+        self.done.emit(res)
+
+
 class SettingsPage(QWidget):
     settings_changed = Signal()   # после любого изменения
     key_test_hit = Signal()       # нажатие меню-клавиши в режиме теста (из фонового потока)
+    discord_retry = Signal()      # v3.10.0: повторная отправка скриншота в Discord
 
     def __init__(self, store, parent=None):
         super().__init__(parent)
@@ -307,6 +334,97 @@ class SettingsPage(QWidget):
         sec_look.body_layout().addWidget(lbl_look_hint)
         v.addWidget(sec_look)
 
+        # ------------------------- Discord: скриншот объявления (v3.10.0) --
+        sec_dc = SectionFrame("Discord: скриншот объявления (F9)")
+        self.chk_note_dc = QLabel(
+            "F9: шаги макроса до /report → ожидание одобрения объявления "
+            "(распознавание экрана) → скриншот всего экрана → вставка в "
+            "открытый Discord (текущий канал) → оставшиеся шаги."
+        )
+        self.chk_note_dc.setObjectName("hint")
+        self.chk_note_dc.setWordWrap(True)
+        sec_dc.body_layout().addWidget(self.chk_note_dc)
+
+        form_d = QFormLayout()
+        form_d.setSpacing(8)
+        self.ed_dc_key = QLineEdit()
+        self.ed_dc_key.setMaximumWidth(120)
+        self.ed_dc_key.setToolTip("Клавиша запуска полного цикла (по умолчанию F9)")
+        form_d.addRow("Клавиша цикла:", self.ed_dc_key)
+        self.ed_dc_cancel = QLineEdit()
+        self.ed_dc_cancel.setMaximumWidth(120)
+        self.ed_dc_cancel.setToolTip("Отмена ожидания одобрения (по умолчанию F10)")
+        form_d.addRow("Отмена ожидания:", self.ed_dc_cancel)
+        self.sp_dc_counter = QSpinBox()
+        self.sp_dc_counter.setRange(0, 999)
+        self.sp_dc_counter.setToolTip(
+            "Номер последнего ОТПРАВЛЕННОГО объявления. Растёт сам после "
+            "успешной отправки; в окне F9 номер можно исправить руками."
+        )
+        form_d.addRow("Отправлено объявлений:", self.sp_dc_counter)
+        self.sp_dc_total = QSpinBox()
+        self.sp_dc_total.setRange(1, 99)
+        self.sp_dc_total.setToolTip("Знаменатель в «N/13»")
+        form_d.addRow("Всего в очереди:", self.sp_dc_total)
+        self.ed_dc_template = QLineEdit()
+        self.ed_dc_template.setToolTip(
+            "Шаблон текста сообщения. {N} заменится на «4/13»"
+        )
+        form_d.addRow("Текст сообщения:", self.ed_dc_template)
+        self.sp_dc_timeout = QSpinBox()
+        self.sp_dc_timeout.setRange(1, 30)
+        self.sp_dc_timeout.setSuffix(" мин")
+        self.sp_dc_timeout.setToolTip(
+            "Сколько ждать уведомление об одобрении. Если не дождались — "
+            "Discord пропускается, оставшиеся шаги выполняются."
+        )
+        form_d.addRow("Ждать одобрение:", self.sp_dc_timeout)
+        self.ed_dc_webhook = QLineEdit()
+        self.ed_dc_webhook.setPlaceholderText("(необязательно) запасная отправка, если окно Discord не найдено")
+        self.ed_dc_webhook.setToolTip(
+            "Запасной способ: если Discord закрыт, скриншот уйдёт через вебхук "
+            "в заданный канал. Оставьте пустым, если отправляете только в окно Discord."
+        )
+        form_d.addRow("Вебхук (запасной):", self.ed_dc_webhook)
+        sec_dc.body_layout().addLayout(form_d)
+
+        h_dc = QHBoxLayout()
+        self.btn_dc_ocr_test = QPushButton("🔍 Проверить OCR")
+        self.btn_dc_ocr_test.setToolTip(
+            "Снять экран и запустить распознавание — увидите, что видит программа"
+        )
+        self.btn_dc_ocr_test.clicked.connect(self._dc_ocr_test)
+        h_dc.addWidget(self.btn_dc_ocr_test)
+        self.btn_dc_retry = QPushButton("📤 Повторить отправку скриншота")
+        self.btn_dc_retry.setToolTip(
+            "Если отправка в Discord не удалась — отправить последний "
+            "скриншот заново (без повторного макроса, номер не задвоится)"
+        )
+        self.btn_dc_retry.clicked.connect(self.discord_retry.emit)
+        h_dc.addWidget(self.btn_dc_retry)
+        self.btn_dc_webhook_test = QPushButton("Тест вебхука")
+        self.btn_dc_webhook_test.setToolTip("Отправить в вебхук пробное сообщение")
+        self.btn_dc_webhook_test.clicked.connect(self._dc_webhook_test)
+        h_dc.addWidget(self.btn_dc_webhook_test)
+        h_dc.addStretch(1)
+        sec_dc.body_layout().addLayout(h_dc)
+
+        self.lbl_dc_state = QLabel("")
+        self.lbl_dc_state.setObjectName("hint")
+        self.lbl_dc_state.setWordWrap(True)
+        sec_dc.body_layout().addWidget(self.lbl_dc_state)
+        lbl_dc_hint = QLabel(
+            "Как определить номер: программа считает сама (счётчик растёт "
+            "после успешной отправки), а в окне подтверждения F9 номер можно "
+            "исправить руками. Если объявления шлют несколько человек с "
+            "разных ПК — проверяйте номер в окне перед запуском. OCR требует "
+            "Windows 10/11 и русский язык в списке языков Windows."
+        )
+        lbl_dc_hint.setObjectName("hint")
+        lbl_dc_hint.setWordWrap(True)
+        sec_dc.body_layout().addWidget(lbl_dc_hint)
+        v.addWidget(sec_dc)
+
         # ------------------------------ экспорт и импорт (v3.8.0) --
         sec_port = SectionFrame("Экспорт и импорт (перенос на другой ПК)")
         h_port = QHBoxLayout()
@@ -476,6 +594,23 @@ class SettingsPage(QWidget):
             self.sp_opacity.setValue(int(getattr(s, "overlay_opacity", 100)))
         except Exception:
             self.sp_opacity.setValue(100)
+        # v3.10.0: Discord-цикл F9
+        self.ed_dc_key.setText(getattr(s, "discord_hotkey", "f9").upper())
+        self.ed_dc_cancel.setText(getattr(s, "discord_cancel_hotkey", "f10").upper())
+        try:
+            self.sp_dc_counter.setValue(int(getattr(s, "discord_wave_counter", 0)))
+        except Exception:
+            self.sp_dc_counter.setValue(0)
+        try:
+            self.sp_dc_total.setValue(int(getattr(s, "discord_wave_total", 13)))
+        except Exception:
+            self.sp_dc_total.setValue(13)
+        self.ed_dc_template.setText(getattr(s, "discord_msg_template", "Госволна {N}"))
+        try:
+            self.sp_dc_timeout.setValue(int(getattr(s, "discord_timeout_min", 5)))
+        except Exception:
+            self.sp_dc_timeout.setValue(5)
+        self.ed_dc_webhook.setText(getattr(s, "discord_webhook", ""))
         self._load_tz()
 
     # ---------------------------------------------------------------- apply --
@@ -630,6 +765,129 @@ class SettingsPage(QWidget):
         self.store.save()
         self._emit_changed()
 
+    def _apply_discord(self, *_a) -> None:
+        """Применить секцию Discord (v3.10.0)."""
+        if self._busy_loading():
+            return
+        s = self.store.settings
+        s.discord_hotkey = self.ed_dc_key.text().strip().lower() or "f9"
+        s.discord_cancel_hotkey = self.ed_dc_cancel.text().strip().lower() or "f10"
+        s.discord_wave_counter = int(self.sp_dc_counter.value())
+        s.discord_wave_total = int(self.sp_dc_total.value())
+        s.discord_msg_template = self.ed_dc_template.text().strip() or "Госволна {N}"
+        s.discord_timeout_min = int(self.sp_dc_timeout.value())
+        s.discord_webhook = self.ed_dc_webhook.text().strip()
+        s.normalize()
+        # показать в полях нормализованные значения (кириллица → латиница)
+        if self.ed_dc_key.text() != s.discord_hotkey.upper():
+            self.ed_dc_key.setText(s.discord_hotkey.upper())
+        if self.ed_dc_cancel.text() != s.discord_cancel_hotkey.upper():
+            self.ed_dc_cancel.setText(s.discord_cancel_hotkey.upper())
+        self.store.save()
+        self._emit_changed()
+
+    # ------------------------------------------------- Discord: тесты (v3.10.0) --
+    def _dc_ocr_test(self) -> None:
+        """Снять экран и прогнать через OCR — показать, что видит программа."""
+        from PySide6.QtWidgets import QApplication
+
+        self.btn_dc_ocr_test.setEnabled(False)
+        self.lbl_dc_state.setStyleSheet("color: #94A3B8;")
+        self.lbl_dc_state.setText("⏳ Снимаю экран и распознаю… (несколько секунд)")
+        try:
+            scr = QApplication.primaryScreen()
+            pm = scr.grabWindow(0) if scr else None
+            if pm is None or pm.isNull():
+                raise RuntimeError("не удалось снять экран")
+            img = pm.toImage()
+            probe = ocr_watch.make_probe_file()
+            if not img.save(probe, "PNG"):
+                raise RuntimeError("не удалось сохранить кадр")
+        except Exception as e:
+            self.btn_dc_ocr_test.setEnabled(True)
+            self.lbl_dc_state.setStyleSheet(f"color: {DANGER};")
+            self.lbl_dc_state.setText(f"✗ Снять экран не удалось: {e}")
+            return
+        w, h = int(img.width() * 0.6), int(img.height() * 0.35)
+
+        def work() -> str:
+            try:
+                return ocr_watch.ocr_region_to_text(probe, 0, 0, w, h)
+            finally:
+                try:
+                    os.unlink(probe)
+                except Exception:
+                    pass
+
+        self._ocr_runner = _AsyncRunner(work)
+        self._ocr_runner.done.connect(self._dc_ocr_test_done)
+        self._ocr_runner.start()
+
+    def _dc_ocr_test_done(self, res: object) -> None:
+        self.btn_dc_ocr_test.setEnabled(True)
+        ok, val = res
+        if not ok:
+            self.lbl_dc_state.setStyleSheet(f"color: {DANGER};")
+            self.lbl_dc_state.setText(f"✗ OCR не сработал: {val}")
+            return
+        text = (val or "").strip()
+        if not text:
+            self.lbl_dc_state.setStyleSheet(f"color: {DANGER};")
+            self.lbl_dc_state.setText(
+                "✗ OCR вернул пусто: проверьте, что стоит Windows 10/11 и "
+                "русский язык в «Параметры → Время и язык → Язык»"
+            )
+            return
+        verdict = "✓ одобрение будет распознано" if ocr_watch.match_approval(text) else (
+            "✓ OCR работает (слов «одобрен/одобрили» на экране сейчас нет — "
+            "это нормально)")
+        self.lbl_dc_state.setStyleSheet(f"color: {OK};")
+        self.lbl_dc_state.setText(
+            f"✓ OCR работает. Распознано: «{text[:140]}». {verdict}")
+
+    def _dc_webhook_test(self) -> None:
+        """Отправить пробное сообщение в вебхук (фоновый поток)."""
+        from PySide6.QtWidgets import QApplication
+
+        url = self.ed_dc_webhook.text().strip()
+        if not url:
+            self.lbl_dc_state.setStyleSheet(f"color: {DANGER};")
+            self.lbl_dc_state.setText("✗ Вебхук не задан — заполните поле выше")
+            return
+        self.btn_dc_webhook_test.setEnabled(False)
+        self.lbl_dc_state.setStyleSheet("color: #94A3B8;")
+        self.lbl_dc_state.setText("⏳ Отправляю пробное сообщение…")
+
+        def work() -> str:
+            from .. import discord_send
+
+            tmp_probe = ocr_watch.make_probe_file()
+            try:
+                from PySide6.QtGui import QImage
+
+                img = QImage(64, 64, QImage.Format_ARGB32)
+                img.fill(0xFF3B82F6)
+                if not img.save(tmp_probe, "PNG"):
+                    raise RuntimeError("не удалось создать тестовый PNG")
+                ok = discord_send.send_via_webhook(url, "MTH: тест вебхука", tmp_probe)
+                return "OK — проверьте канал" if ok else "не удалось (смотрите error.log)"
+            finally:
+                try:
+                    os.unlink(tmp_probe)
+                except Exception:
+                    pass
+
+        self._wh_runner = _AsyncRunner(work)
+        self._wh_runner.done.connect(self._dc_webhook_test_done)
+        self._wh_runner.start()
+
+    def _dc_webhook_test_done(self, res: object) -> None:
+        self.btn_dc_webhook_test.setEnabled(True)
+        ok, val = res
+        self.lbl_dc_state.setStyleSheet(f"color: {OK if ok and val else DANGER};")
+        self.lbl_dc_state.setText(
+            (f"✓ Вебхук: {val}" if ok and val else f"✗ Вебхук: {val}"))
+
     def _export_all(self) -> None:
         """Экспорт ВСЕГО (фразы + настройки) в один JSON-файл."""
         try:
@@ -687,6 +945,7 @@ class SettingsPage(QWidget):
                 self._apply_notify()
                 self._apply_gov_extra()
                 self._apply_overlay_ui()
+                self._apply_discord()
                 self._apply_tray(self.chk_tray.isChecked())
                 self._apply_wl(self.chk_wl.isChecked())
                 self._apply_wl_text()

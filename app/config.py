@@ -58,3 +58,17 @@ def get_data_dir() -> Path:
 
 def get_data_file() -> Path:
     return get_data_dir() / "data.json"
+
+
+def get_screenshots_dir() -> Path:
+    """Папка скриншотов объявления (data/screenshots, v3.10.0).
+
+    Сюда сохраняется полный скриншот перед отправкой в Discord — если
+    Discord недоступен, файл остаётся здесь и его можно отправить повторно.
+    """
+    d = get_data_dir() / "screenshots"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        d = get_data_dir()
+    return d

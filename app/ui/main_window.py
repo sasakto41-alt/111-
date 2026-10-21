@@ -4,29 +4,36 @@ from __future__ import annotations
 import ctypes
 import sys
 import threading
+import time
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from .. import sounds, window_utils
-from ..config import APP_NAME
+from .. import discord_send, ocr_watch, sounds, window_utils
+from ..config import APP_NAME, get_screenshots_dir
 from ..icons import app_icon
 from ..journal import log
 from ..models import (
-    CATEGORIES, TextEntry, normalize_hotkey,
+    CATEGORIES, TextEntry, format_discord_message, normalize_hotkey,
 )
 from ..sender import SendWorker, Sender
 from .. import APP_VERSION
 from .card import MIME_ENTRY, PhraseCard
+from .discord_dialog import DiscordConfirmDialog, DiscordWaitToast
 from .editor import TextEditorDialog
 from .flow_layout import FlowLayout
 from .gov_countdown import GovCountdownBadge
 from .gov_notify import GovNotifyToast
 from .gov_overlay import GovWaveOverlay, MacroConfirmDialog
-from .gov_wave import GovWavePage, gov_alert_state, now_in_tz, plan_macro_sequence
+from .gov_wave import (
+    GovWavePage, gov_alert_state, now_in_tz, plan_macro_sequence,
+    plan_macro_sequence_keys,
+)
 from .settings import SettingsPage
 from .theme import build_qss
 from .widgets import SectionFrame, Toast
@@ -61,6 +68,17 @@ class MainWindow(QWidget):
         # v3.6.0: состояние последовательности макроса
         self._seq: list = []
         self._seq_i = 0
+        # v3.10.0: состояние F9-цикла «госволна → одобрение → Discord»
+        self._dc_state = "idle"      # idle | steps | wait | send | tail
+        self._dc_number = 0
+        self._dc_plan: list = []     # [(ключ, подпись, команда), …]
+        self._dc_i = 0
+        self._dc_wait_idx = 0        # после этого шага ждём одобрение
+        self._dc_pause_ms = 4000
+        self._dc_press_enter = True
+        self._dc_t0 = 0.0
+        self._dc_last_shot = ""      # последний скриншот (для повторной отправки)
+        self._dc_last_shot_number = 0
 
         self._build_ui()
         self.setStyleSheet(build_qss())
@@ -132,6 +150,8 @@ class MainWindow(QWidget):
         self._settings_page = SettingsPage(self.store)
         self._settings_page.settings_changed.connect(self._on_settings_changed)
         self._settings_page.set_hotkeys(self.hotkeys)
+        # v3.10.0: повторная отправка скриншота из Настроек
+        self._settings_page.discord_retry.connect(self.discord_retry_send)
         self.stack.addWidget(self._settings_page)
         self.switch_page(PAGE_LIBRARY)
 
@@ -141,6 +161,22 @@ class MainWindow(QWidget):
         self._gov_overlay.slots_updated.connect(self._on_gov_slots_updated)
         self._macro_dialog = MacroConfirmDialog(self.store)
         self._macro_dialog.confirmed.connect(self._macro_confirmed)
+
+        # --- v3.10.0: F9-цикл «госволна → одобрение → скриншот → Discord» ---
+        self._dc_dialog = DiscordConfirmDialog(self.store)
+        self._dc_dialog.confirmed.connect(self._discord_flow_start)
+        self._dc_wait = DiscordWaitToast()
+        self._ocr = ocr_watch.ApprovalWatcher()
+        self._ocr.recognized.connect(self._discord_approval_found)
+        self._ocr.ocr_error.connect(self._discord_wait_fail_ocr)
+        self._ocr_timer = QTimer(self)
+        self._ocr_timer.setInterval(3000)
+        self._ocr_timer.timeout.connect(self._discord_probe_tick)
+        self._dc_thread = QThread(self)
+        self._dc_worker = discord_send.DiscordSendWorker()
+        self._dc_worker.moveToThread(self._dc_thread)
+        self._dc_thread.start()
+        self._dc_worker.finished.connect(self._discord_sent)
 
         self.toast = Toast(self)
 
@@ -480,6 +516,9 @@ class MainWindow(QWidget):
 
     def show_macro_confirm(self) -> None:
         s = self.store.settings
+        if self._dc_state != "idle":
+            self.show_toast("F9-цикл ещё идёт — дождитесь завершения")
+            return
         if not getattr(s, "gov_macro_enabled", False):
             log("макрос: клавиша нажата, но макрос выключен в настройках")
             self.show_toast("Макрос Госволны выключен — включите его в Настройках")
@@ -544,6 +583,275 @@ class MainWindow(QWidget):
         if self._seq_i < len(self._seq):
             QTimer.singleShot(max(500, pause_ms), lambda: self._seq_step(pause_ms, press_enter))
 
+    # ------------------------------------------- F9-цикл: Discord (v3.10.0) --
+    def show_discord_confirm(self) -> None:
+        """F9: окно подтверждения полного цикла (шаги → одобрение → Discord)."""
+        if self._dc_state != "idle":
+            self.show_toast("F9-цикл уже идёт — дождитесь завершения "
+                            "(в режиме ожидания отмена — F10)")
+            return
+        if self._seq and self._seq_i < len(self._seq):
+            self.show_toast("Макрос F8 ещё выполняется — подождите")
+            return
+        if not plan_macro_sequence_keys(self.store.settings):
+            self.show_toast("Макрос пустой — соберите шаги в меню Госволны (F7)")
+            return
+        self._dc_dialog.open_dialog()
+
+    def cancel_discord_wait(self) -> None:
+        """F10: отменить ожидание одобрения (Discord пропускается, хвост идёт)."""
+        if self._dc_state == "wait":
+            self._discord_wait_finish(reason="отменено клавишей (F10)")
+
+    def discord_retry_send(self) -> None:
+        """Повторная отправка последнего скриншота БЕЗ повторного макроса."""
+        if self._dc_state != "idle":
+            self.show_toast("F9-цикл занят — повторите позже")
+            return
+        path = self._dc_last_shot
+        if not path or not Path(path).exists():
+            files = sorted(Path(get_screenshots_dir()).glob("*.png"))
+            path = str(files[-1]) if files else ""
+        if not path:
+            self.show_toast("Нет сохранённых скриншотов для повторной отправки")
+            return
+        img = QImage(path)
+        if img.isNull():
+            self.show_toast(f"Файл скриншота не читается: {path}")
+            return
+        s = self.store.settings
+        number = self._dc_last_shot_number or max(1, int(s.discord_wave_counter or 0) + 1)
+        self._dc_state = "send"
+        self._dc_number = number
+        self._dc_last_shot = path
+        log(f"F9-цикл: ПОВТОРНАЯ отправка скриншота {path} (номер {number})")
+        self.show_toast(f"Повторная отправка в Discord: «{format_discord_message(s, number)}»")
+        self._dc_worker.deliver.emit(
+            img, path, format_discord_message(s, number),
+            getattr(s, "discord_webhook", "") or "",
+        )
+
+    def _discord_flow_start(self, number: int) -> None:
+        """«Да» в подтверждении F9: этап «steps» — шаги до /report."""
+        if self._dc_state != "idle":
+            return
+        s = self.store.settings
+        self._dc_plan = plan_macro_sequence_keys(s)
+        if not self._dc_plan:
+            self.show_toast("Макрос пустой — соберите шаги в меню Госволны (F7)")
+            return
+        self._dc_number = max(1, int(number))
+        self._dc_last_shot_number = self._dc_number
+        self._dc_i = 0
+        self._dc_wait_idx = len(self._dc_plan) - 1
+        for i, (key, _l, _t) in enumerate(self._dc_plan):
+            if key == "step4":            # последний /report — точка ожидания
+                self._dc_wait_idx = i
+        try:
+            self._dc_pause_ms = int(getattr(s, "gov_macro_step_pause_ms", 4000))
+        except Exception:
+            self._dc_pause_ms = 4000
+        self._dc_press_enter = bool(getattr(s, "gov_macro_press_enter", True))
+        self._dc_state = "steps"
+        log(
+            f"F9-цикл: СТАРТ — {format_discord_message(s, self._dc_number)}; "
+            f"шагов {len(self._dc_plan)}, ожидание одобрения после шага "
+            f"{self._dc_wait_idx + 1}; авто-Enter={'вкл' if self._dc_press_enter else 'выкл'}"
+        )
+        self.show_toast(f"F9-цикл запущен — {format_discord_message(s, self._dc_number)}")
+        self._discord_step()
+
+    def _discord_step(self) -> None:
+        """Отправить очередной шаг первой части цепочки (этап «steps»)."""
+        if self._dc_state != "steps":
+            return
+        if self._dc_i > self._dc_wait_idx:
+            self._discord_start_wait()
+            return
+        n = len(self._dc_plan)
+        key, label, text = self._dc_plan[self._dc_i]
+        tail = " (Enter нажмётся сам)" if self._dc_press_enter else ""
+        self.show_toast(f"F9 — шаг {self._dc_i + 1}/{n}{tail}: {label}")
+        log(f"F9-цикл: шаг {self._dc_i + 1}/{n} — {label}")
+        self._worker.requested_seq.emit(
+            TextEntry(
+                title=f"[F9 {self._dc_i + 1}/{n}] {label}",
+                text=text, category="Госволна",
+            ),
+            bool(self._dc_press_enter),
+        )
+        self._dc_i += 1
+        QTimer.singleShot(max(500, self._dc_pause_ms), self._discord_step)
+
+    def _discord_start_wait(self) -> None:
+        """Этап «wait»: запуск OCR-надзора и панели ожидания."""
+        s = self.store.settings
+        self._dc_state = "wait"
+        self._dc_t0 = time.monotonic()
+        try:
+            tmo = int(getattr(s, "discord_timeout_min", 5))
+        except Exception:
+            tmo = 5
+        try:
+            cancel_hk = (getattr(s, "discord_cancel_hotkey", "f10") or "f10").upper()
+        except Exception:
+            cancel_hk = "F10"
+        self._ocr.reset()
+        self._ocr.start()
+        self._dc_wait.start_wait(tmo, cancel_hk)
+        self._ocr_timer.start()
+        log(f"F9-цикл: ЖДУ ОДОБРЕНИЕ (таймаут {tmo} мин, отмена {cancel_hk}, "
+            f"опрос экрана каждые 3 с)")
+
+    def _discord_probe_tick(self) -> None:
+        """Тик OCR (каждые 3 с): таймаут + снимок первичного экрана."""
+        if self._dc_state != "wait":
+            self._ocr_timer.stop()
+            return
+        s = self.store.settings
+        try:
+            tmo = int(getattr(s, "discord_timeout_min", 5))
+        except Exception:
+            tmo = 5
+        if time.monotonic() - self._dc_t0 > tmo * 60:
+            self._discord_wait_finish(
+                reason=f"таймаут {tmo} мин — одобрение не появилось")
+            return
+        try:
+            scr = QApplication.primaryScreen()
+            if scr is None:
+                return
+            pm = scr.grabWindow(0)
+            if pm is None or pm.isNull():
+                return
+            img = pm.toImage()
+            path = ocr_watch.make_probe_file()
+            if not img.save(path, "PNG"):
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return
+            # зона уведомлений игры: левый верхний участок экрана
+            w = int(img.width() * 0.6)
+            h = int(img.height() * 0.35)
+            self._ocr.submit(path, 0, 0, w, h)
+        except Exception as e:
+            log(f"F9-цикл: кадр OCR не удался: {e}")
+
+    def _discord_approval_found(self, text: str) -> None:
+        """OCR увидел одобрение: скриншот всего экрана → Discord (этап «send»)."""
+        if self._dc_state != "wait":
+            return
+        self._dc_state = "send"
+        self._ocr_timer.stop()
+        self._dc_wait.set_phase("ДЕЛАЮ СКРИНШОТ…")
+        log("F9-цикл: ОДОБРЕНИЕ ОБНАРУЖЕНО — снимаю весь экран (первичный монитор)")
+        self.show_toast("✓ Одобрение увидел — скриншот + отправка в Discord")
+        try:
+            scr = QApplication.primaryScreen()
+            pm = scr.grabWindow(0) if scr else None
+            if pm is None or pm.isNull():
+                raise RuntimeError("не удалось снять экран")
+            img = pm.toImage()
+            s = self.store.settings
+            from datetime import datetime as _dt
+
+            path = str(Path(get_screenshots_dir()) /
+                       f"{_dt.now():%Y%m%d-%H%M%S}-N{self._dc_number}.png")
+            if not img.save(path, "PNG"):
+                raise RuntimeError(f"не удалось сохранить {path}")
+            self._dc_last_shot = path
+            log(f"F9-цикл: скриншот сохранён: {path} ({img.width()}x{img.height()}, PNG)")
+            self._dc_wait.set_phase("ОТПРАВЛЯЮ В DISCORD…")
+            msg = format_discord_message(s, self._dc_number)
+            log(f"F9-цикл: отправка в Discord: {msg!r} + скриншот вложением")
+            self._dc_worker.deliver.emit(
+                img, path, msg, getattr(s, "discord_webhook", "") or "",
+            )
+        except Exception as e:
+            log(f"F9-цикл: скриншот/отправка не начались: {e}")
+            self._dc_wait.stop_wait()
+            self.show_toast(f"✗ Скриншот не удался ({e}) — Discord пропущен")
+            self._discord_finish_tail()
+
+    def _discord_sent(self, ok: bool, detail: str) -> None:
+        """Результат отправки в Discord (из рабочего потока, в GUI-потоке)."""
+        if self._dc_state != "send":
+            return
+        s = self.store.settings
+        self._dc_wait.stop_wait()
+        if ok:
+            # счётчик растёт ТОЛЬКО после успешной отправки — номер не выдаётся
+            # дважды; повторная отправка тот же номер не задвоит
+            try:
+                s.discord_wave_counter = max(
+                    int(s.discord_wave_counter or 0), int(self._dc_number))
+                s.normalize()
+                self.store.save()
+            except Exception as e:
+                log(f"F9-цикл: счётчик не сохранён: {e}")
+            log(f"F9-цикл: Discord OK ({detail}); счётчик объявлений = "
+                f"{getattr(s, 'discord_wave_counter', '?')}")
+            self.show_toast(
+                f"✓ Отправлено в Discord: «{format_discord_message(s, self._dc_number)}»")
+        else:
+            log(f"F9-цикл: Discord НЕ удалось ({detail}); скриншот сохранён: "
+                f"{self._dc_last_shot}")
+            self.show_toast(
+                f"✗ Не удалось отправить в Discord ({detail}). Скриншот сохранён — "
+                "повторная отправка в Настройках → «Discord»")
+        self._discord_finish_tail()
+
+    def _discord_wait_fail_ocr(self, msg: str) -> None:
+        if self._dc_state == "wait":
+            self._discord_wait_finish(reason=f"распознавание недоступно: {msg}")
+
+    def _discord_wait_finish(self, reason: str) -> None:
+        """Таймаут/отмена/сбой OCR: Discord пропускается, хвост выполняется."""
+        if self._dc_state != "wait":
+            return
+        self._dc_state = "tail"
+        self._ocr_timer.stop()
+        self._ocr.stop()
+        self._dc_wait.stop_wait()
+        self.show_toast(f"✗ Одобрение не обнаружено ({reason}) — Discord пропущен")
+        log(f"F9-цикл: ожидание одобрения прервано ({reason}) — Discord пропущен, "
+            f"выполняются оставшиеся шаги")
+        self._discord_finish_tail(started=True)
+
+    def _discord_finish_tail(self, started: bool = False) -> None:
+        """Этап «tail»: оставшиеся шаги макроса после точки ожидания."""
+        if not started:
+            self._dc_state = "tail"
+            self._ocr.stop()
+        self._dc_i = self._dc_wait_idx + 1
+        self._discord_tail_step()
+
+    def _discord_tail_step(self) -> None:
+        if self._dc_state != "tail":
+            return
+        n = len(self._dc_plan)
+        if self._dc_i >= n:
+            self._dc_state = "idle"
+            sounds.play_macro_done(self.store.settings)
+            self.show_toast("✓ F9-цикл завершён полностью")
+            log("F9-цикл: ЗАВЕРШЁН (шаги → одобрение → Discord → хвост)")
+            return
+        key, label, text = self._dc_plan[self._dc_i]
+        tail = " (Enter нажмётся сам)" if self._dc_press_enter else ""
+        self.show_toast(f"F9 — шаг {self._dc_i + 1}/{n}{tail}: {label}")
+        log(f"F9-цикл: шаг {self._dc_i + 1}/{n} (хвост) — {label}")
+        self._worker.requested_seq.emit(
+            TextEntry(
+                title=f"[F9 {self._dc_i + 1}/{n}] {label}",
+                text=text, category="Госволна",
+            ),
+            bool(self._dc_press_enter),
+        )
+        self._dc_i += 1
+        QTimer.singleShot(max(500, self._dc_pause_ms), self._discord_tail_step)
+
     # ------------------------------------------- уведомление о госволне (v3.7.0) --
     def _check_gov_notify(self) -> None:
         """Опрос часов: за N минут до слота показать красное уведомление.
@@ -579,7 +887,7 @@ class MainWindow(QWidget):
             log(f"уведомление о госволне: ошибка {e}")
 
     def apply_extra_hotkeys(self) -> None:
-        """(Пере)запустить клавиши меню Госволны и макроса по настройкам."""
+        """(Пере)запустить клавиши меню Госволны, макроса и F9-цикла по настройкам."""
         s = self.store.settings
         try:
             menu_hk = normalize_hotkey(s.menu_hotkey)
@@ -597,6 +905,23 @@ class MainWindow(QWidget):
                 self.hotkeys.start_macro(s.gov_macro_hotkey)
             else:
                 self.hotkeys.stop_macro()
+            # v3.10.0: клавиша F9-цикла и клавиша отмены ожидания
+            taken = {menu_hk}
+            if s.gov_menu_enabled and gov_hk:
+                taken.add(gov_hk)
+            if macro_ok and macro_hk:
+                taken.add(macro_hk)
+            dc_hk = normalize_hotkey(getattr(s, "discord_hotkey", "f9") or "f9")
+            if dc_hk and dc_hk not in taken:
+                self.hotkeys.start_discord(s.discord_hotkey)
+                taken.add(dc_hk)
+            else:
+                self.hotkeys.stop_discord()
+            c_hk = normalize_hotkey(getattr(s, "discord_cancel_hotkey", "f10") or "f10")
+            if c_hk and c_hk != dc_hk and c_hk not in taken:
+                self.hotkeys.start_cancel(s.discord_cancel_hotkey)
+            else:
+                self.hotkeys.stop_cancel()
         except Exception as e:
             log(f"доп. хоткеи: ошибка {e}")
         if not getattr(s, "gov_menu_enabled", False) and self._gov_overlay._shown_flag:

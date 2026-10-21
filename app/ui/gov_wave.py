@@ -173,16 +173,25 @@ def plan_macro_sequence(settings) -> List[Tuple[str, str]]:
     settings.gov_macro_action (поведение v3.5.0). Пустые команды
     (например, не заполнен шаблон /gnews) пропускаются.
     """
+    return [(lb, tx) for _k, lb, tx in plan_macro_sequence_keys(settings)]
+
+
+def plan_macro_sequence_keys(settings) -> List[Tuple[str, str, str]]:
+    """То же, что plan_macro_sequence, но с КЛЮЧАМИ шагов: [(ключ, подпись, команда)].
+
+    Нужен F9-циклу (v3.10.0), чтобы найти шаг «/report» и понять, после
+    какого шага ждать одобрения объявления.
+    """
     steps = list(getattr(settings, "gov_macro_steps", []) or [])
     if not any(st in GOV_MACRO_ACTIONS for st in steps):
         steps = [getattr(settings, "gov_macro_action", "step2")]
-    out: List[Tuple[str, str]] = []
+    out: List[Tuple[str, str, str]] = []
     for st in steps:
         if st not in GOV_MACRO_ACTIONS:
             continue
         text = resolve_macro_command(settings, st)
         if text:
-            out.append((GOV_MACRO_LABELS.get(st, st), text))
+            out.append((st, GOV_MACRO_LABELS.get(st, st), text))
     return out
 
 

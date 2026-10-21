@@ -1074,6 +1074,172 @@ def run_smoke() -> int:
     except Exception as e:
         check(f"v3.9.0: {type(e).__name__}: {e}", False)
 
+    # 21. v3.10.0: F9-цикл «госволна → одобрение → скриншот → Discord»
+    try:
+        from PySide6.QtCore import Qt as _QtA
+        from PySide6.QtGui import QImage as _QImg
+
+        from app import discord_send as _ds
+        from app import models as _m10
+        from app import ocr_watch as _ocr10
+        from app import APP_VERSION as _ver10
+        from app.config import get_screenshots_dir as _gshots
+        from app.hotkeys import HotkeyManager as _HM10
+        from app.storage import Store as _Store10
+        from app.ui.discord_dialog import (
+            DiscordConfirmDialog as _DCD,
+            DiscordWaitToast as _DWT,
+        )
+        from app.ui.gov_wave import plan_macro_sequence_keys as _plan10
+        from app.ui.main_window import MainWindow as _MW10
+
+        check("v3.10.0: версия >= 3.10.0",
+              tuple(int(x) for x in _ver10.split(".")) >= (3, 10, 0))
+
+        with tempfile.TemporaryDirectory() as tdA:
+            stA = _Store10(path=Path(tdA) / "d.json")
+            sA = stA.settings
+            check("v3.10.0: настройки Discord по умолчанию",
+                  sA.discord_hotkey == "f9" and sA.discord_cancel_hotkey == "f10"
+                  and sA.discord_wave_counter == 0 and sA.discord_wave_total == 13
+                  and sA.discord_msg_template == "Госволна {N}"
+                  and sA.discord_timeout_min == 5)
+            sA.discord_wave_counter = 1000
+            sA.discord_wave_total = 0
+            sA.discord_timeout_min = 99
+            sA.normalize()
+            check("v3.10.0: normalize ограничивает счётчик/знаменатель/таймаут",
+                  sA.discord_wave_counter == 999 and sA.discord_wave_total == 1
+                  and sA.discord_timeout_min == 30)
+            sA2 = _m10.Settings.from_dict({
+                "discord_msg_template": "Объявление №{N}", "discord_wave_counter": 4,
+            })
+            check("v3.10.0: from_dict переносит новые поля",
+                  sA2.discord_wave_counter == 4 and "{N}" in sA2.discord_msg_template)
+            check("v3.10.0: текст сообщения «Объявление №5/13»",
+                  _m10.format_discord_message(sA2, 5) == "Объявление №5/13")
+            check("v3.10.0: шаблон по умолчанию даёт «Госволна 4/13»",
+                  _m10.format_discord_message(_m10.Settings(), 4) == "Госволна 4/13")
+            sA3 = _m10.Settings.from_dict(
+                {"gov_menu_enabled": True, "gov_menu_hotkey": "f9"})
+            check("v3.10.0: валидатор ловит конфликт F9 с меню Госволны",
+                  any("F9-цикла" in e for e in sA3.validate()))
+
+            # --- план с ключами и точка ожидания ---
+            stA.settings.gov_macro_steps = ["step1", "step4", "step2", "step5"]
+            plan = _plan10(sA)
+            check("v3.10.0: план с ключами сохранил порядок",
+                  len(plan) == 4 and plan[1][0] == "step4")
+            wait_idx = max(
+                (i for i, (k, _l, _t) in enumerate(plan) if k == "step4"),
+                default=len(plan) - 1,
+            )
+            check("v3.10.0: точка ожидания — после /report", wait_idx == 1)
+            stA.settings.gov_macro_steps = ["step2", "step5"]
+            plan2 = _plan10(sA)
+            wait_idx2 = max(
+                (i for i, (k, _l, _t) in enumerate(plan2) if k == "step4"),
+                default=len(plan2) - 1,
+            )
+            check("v3.10.0: без /report ожидание в самом конце",
+                  wait_idx2 == len(plan2) - 1)
+
+            # --- распознавание одобрения ---
+            check("v3.10.0: «объявление одобрено» распознаётся",
+                  _ocr10.match_approval("Ваше объявление одобрено и опубликовано"))
+            check("v3.10.0: «Одобрили» распознаётся",
+                  _ocr10.match_approval("Объявление Одобрили админы"))
+            check("v3.10.0: обычный текст чата не триггерит",
+                  not _ocr10.match_approval("LSPD принял вызов 10-15"))
+            check("v3.10.0: ocr_available() возвращает bool без падений",
+                  isinstance(_ocr10.ocr_available(), bool))
+            if not _ocr10.ocr_available():
+                try:
+                    _ocr10.ocr_region_to_text("nope.png")
+                    ok_na = False
+                except _ocr10.OcrUnavailable:
+                    ok_na = True
+                except Exception:
+                    ok_na = False
+                check("v3.10.0: вне Windows OCR честно недоступен", ok_na)
+
+            # --- multipart вебхука и DIB-конвертация ---
+            ctype, body = _ds.build_multipart("Госволна 1/13", b"PNGDATA")
+            check("v3.10.0: multipart содержит payload_json и файл",
+                  ctype.startswith("multipart/form-data") and b"payload_json" in body
+                  and b"PNGDATA" in body and b"screenshot.png" in body)
+            img_dib = _QImg(4, 3, _QImg.Format_ARGB32)
+            img_dib.fill(0xFF112233)
+            dib = _ds.qimage_to_dib(img_dib)
+            check("v3.10.0: DIB: заголовок 40 байт, размер сходится",
+                  len(dib) == 40 + 3 * 16      # 40 (BITMAPINFOHEADER) + 3 строки по 16 байт
+                  and dib[0:4] == (40).to_bytes(4, "little"))
+            check("v3.10.0: поиск окна Discord не падает (вне Windows → 0)",
+                  isinstance(_ds.find_discord_window(), int))
+
+            # --- окно подтверждения F9 ---
+            # вернуть значения после теста normalize (выше total стало 1)
+            sA.discord_wave_counter = 0
+            sA.discord_wave_total = 13
+            sA.discord_timeout_min = 5
+            stA.settings.gov_macro_steps = ["step2", "step4", "step5"]
+            dlg = _DCD(stA)
+            check("v3.10.0: диалог F9 со спином номера и превью",
+                  hasattr(dlg, "sp_number") and hasattr(dlg, "lbl_preview"))
+            dlg.open_dialog()
+            check("v3.10.0: номер по умолчанию = счётчик + 1",
+                  dlg.sp_number.value() == 1)
+            check("v3.10.0: превью показывает «1/13»", "1/13" in dlg.lbl_preview.text())
+            check("v3.10.0: «Да» заблокирована на 5 с", not dlg.btn_yes.isEnabled())
+            for _ in range(5):
+                dlg._tick()
+            check("v3.10.0: «Да» активна после отсчёта", dlg.btn_yes.isEnabled())
+            dlg.sp_number.setValue(7)
+            check("v3.10.0: правка номера обновила превью",
+                  "7/13" in dlg.lbl_preview.text())
+            got: list = []
+            dlg.confirmed.connect(lambda n: got.append(n))
+            dlg._on_yes()
+            check("v3.10.0: «Да» отдала выбранный номер", got == [7])
+            check("v3.10.0: диалог скрылся после «Да»", not dlg.isVisible())
+
+            # --- панель ожидания одобрения ---
+            wt = _DWT()
+            check("v3.10.0: панель ожидания не крадёт фокус",
+                  wt.testAttribute(_QtA.WA_ShowWithoutActivating)
+                  and wt.testAttribute(_QtA.WA_TransparentForMouseEvents))
+            wt.start_wait(5, "F10")
+            check("v3.10.0: панель ожидания показана с подсказкой F10",
+                  wt.isVisible() and "F10" in wt.lbl_sub.text())
+            wt.set_phase("ОТПРАВЛЯЮ В DISCORD…")
+            check("v3.10.0: панель показывает фазу отправки",
+                  "DISCORD" in wt.lbl_title.text())
+            wt.stop_wait()
+            check("v3.10.0: панель ожидания скрывается", not wt.isVisible())
+
+            # --- папка скриншотов и главное окно ---
+            check("v3.10.0: папка скриншотов создаётся", _gshots().exists())
+            win10 = _MW10(stA, _HM10())
+            check("v3.10.0: главное окно в состоянии idle", win10._dc_state == "idle")
+            win10._dc_state = "wait"
+            win10.show_discord_confirm()
+            check("v3.10.0: повторный F9 во время цикла заблокирован",
+                  win10._dc_dialog.isHidden())
+            check("v3.10.0: F8 во время цикла заблокирован",
+                  win10.show_macro_confirm() is None)
+            win10._dc_state = "idle"
+            check("v3.10.0: watcher OCR и тикер на месте (3 с)",
+                  hasattr(win10, "_ocr") and hasattr(win10, "_ocr_timer")
+                  and win10._ocr_timer.interval() == 3000)
+            hk10 = _HM10()
+            hk10.start_discord("f9")
+            hk10.start_cancel("f10")
+            check("v3.10.0: F9/F10 зарезервированы от хоткеев фраз",
+                  "f9" in hk10._reserved and "f10" in hk10._reserved)
+            hk10.stop()
+    except Exception as e:
+        check(f"v3.10.0: {type(e).__name__}: {e}", False)
+
     return _finish()
 
 

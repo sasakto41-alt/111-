@@ -136,6 +136,8 @@ class HotkeyManager(QObject):
     menu_toggled = Signal()
     gov_toggled = Signal()         # v3.5.0: клавиша отдельного меню Госволны
     macro_triggered = Signal()     # v3.5.0: клавиша макроса с подтверждением
+    discord_triggered = Signal()   # v3.10.0: F9-цикл «госволна → одобрение → Discord»
+    cancel_triggered = Signal()    # v3.10.0: отмена ожидания одобрения (F10)
     text_triggered = Signal(str)   # id фразы
     state_changed = Signal(str)
 
@@ -159,6 +161,13 @@ class HotkeyManager(QObject):
         self._macro_hotkey = ""
         self._macro_thread: Optional[_ComboPollThread] = None
         self._macro_hook = None
+        # v3.10.0: F9-цикл и отмена ожидания одобрения
+        self._discord_hotkey = ""
+        self._discord_thread: Optional[_ComboPollThread] = None
+        self._discord_hook = None
+        self._cancel_hotkey = ""
+        self._cancel_thread: Optional[_ComboPollThread] = None
+        self._cancel_hook = None
         self._reserved: set[str] = set()
 
     # ------------------------------------------------------------------ api --
@@ -301,6 +310,98 @@ class HotkeyManager(QObject):
             self._macro_hotkey = ""
             self._rebuild_reserved()
 
+    def start_discord(self, hotkey: str) -> None:
+        """(Пере)запустить опрос клавиши F9-цикла (v3.10.0)."""
+        self.stop_discord()
+        hk = normalize_hotkey(to_latin_key(hotkey or ""))
+        if not hk:
+            return
+        self._discord_hotkey = hk
+        self._rebuild_reserved()
+        groups = combo_groups(hk)
+        if not groups:
+            log(f"F9-цикл: непонятная клавиша «{hk}» — перехват не запущен")
+            return
+        if sys.platform == "win32":
+            self._discord_thread = _ComboPollThread(
+                groups, lambda: self._fire_extra(self.discord_triggered, hk),
+                name="MTH-discord-key",
+            )
+            self._discord_thread.start()
+            log(f"F9-цикл {hk.upper()}: запущен опрос GetAsyncKeyState")
+        elif keyboard is not None:
+            try:
+                self._discord_hook = keyboard.add_hotkey(
+                    hk, lambda: self._fire_extra(self.discord_triggered, hk),
+                    suppress=False, trigger_on_release=True,
+                )
+                log(f"F9-цикл {hk.upper()}: хук keyboard")
+            except Exception as e:
+                log(f"F9-цикл: ошибка регистрации: {e}")
+        self.state_changed.emit(f"F9-цикл: {hk.upper()}")
+
+    def stop_discord(self) -> None:
+        t, self._discord_thread = self._discord_thread, None
+        if t is not None:
+            t.stop()
+            if t.is_alive():
+                t.join(timeout=0.8)
+        if self._discord_hook is not None:
+            try:
+                keyboard.remove_hotkey(self._discord_hook)
+            except Exception:
+                pass
+            self._discord_hook = None
+        if self._discord_hotkey:
+            self._discord_hotkey = ""
+            self._rebuild_reserved()
+
+    def start_cancel(self, hotkey: str) -> None:
+        """(Пере)запустить опрос клавиши отмены ожидания одобрения (v3.10.0)."""
+        self.stop_cancel()
+        hk = normalize_hotkey(to_latin_key(hotkey or ""))
+        if not hk:
+            return
+        self._cancel_hotkey = hk
+        self._rebuild_reserved()
+        groups = combo_groups(hk)
+        if not groups:
+            log(f"отмена ожидания: непонятная клавиша «{hk}» — перехват не запущен")
+            return
+        if sys.platform == "win32":
+            self._cancel_thread = _ComboPollThread(
+                groups, lambda: self._fire_extra(self.cancel_triggered, hk),
+                name="MTH-cancel-key",
+            )
+            self._cancel_thread.start()
+            log(f"отмена ожидания {hk.upper()}: запущен опрос GetAsyncKeyState")
+        elif keyboard is not None:
+            try:
+                self._cancel_hook = keyboard.add_hotkey(
+                    hk, lambda: self._fire_extra(self.cancel_triggered, hk),
+                    suppress=False, trigger_on_release=True,
+                )
+                log(f"отмена ожидания {hk.upper()}: хук keyboard")
+            except Exception as e:
+                log(f"отмена ожидания: ошибка регистрации: {e}")
+        self.state_changed.emit(f"отмена: {hk.upper()}")
+
+    def stop_cancel(self) -> None:
+        t, self._cancel_thread = self._cancel_thread, None
+        if t is not None:
+            t.stop()
+            if t.is_alive():
+                t.join(timeout=0.8)
+        if self._cancel_hook is not None:
+            try:
+                keyboard.remove_hotkey(self._cancel_hook)
+            except Exception:
+                pass
+            self._cancel_hook = None
+        if self._cancel_hotkey:
+            self._cancel_hotkey = ""
+            self._rebuild_reserved()
+
     def _fire_extra(self, sig, hk: str) -> None:
         log(f"доп. клавиша: нажатие зафиксировано ({hk.upper()})")
         try:
@@ -309,7 +410,7 @@ class HotkeyManager(QObject):
             log(f"доп. клавиша: ошибка сигнала: {e}")
 
     def _rebuild_reserved(self) -> None:
-        """Клавиши, занятые меню/госволной/макросом — хоткеи фраз их не берут."""
+        """Клавиши, занятые меню/госволной/макросом/F9 — хоткеи фраз их не берут."""
         r: set[str] = set()
         if self._menu_hotkey:
             r.add(self._menu_hotkey)
@@ -317,6 +418,10 @@ class HotkeyManager(QObject):
             r.add(self._gov_hotkey)
         if self._macro_hotkey:
             r.add(self._macro_hotkey)
+        if self._discord_hotkey:
+            r.add(self._discord_hotkey)
+        if self._cancel_hotkey:
+            r.add(self._cancel_hotkey)
         self._reserved = r
 
     def set_entries(self, entries: Iterable[TextEntry]) -> None:
@@ -352,6 +457,8 @@ class HotkeyManager(QObject):
             self._stop_menu()
             self.stop_gov()
             self.stop_macro()
+            self.stop_discord()
+            self.stop_cancel()
             for h in self._entry_hooks:
                 try:
                     keyboard.remove_hotkey(h)
