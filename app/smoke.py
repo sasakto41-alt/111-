@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -1433,6 +1434,54 @@ def run_smoke() -> int:
                   or "Enter" in pg11._gov_action_status["step3"].text())
     except Exception as e:
         check(f"v3.11.0: {type(e).__name__}: {e}", False)
+
+    # 22. v3.12.0: установщик Inno Setup и CI-сборка
+    try:
+        root22 = Path(__file__).resolve().parent.parent
+        iss22 = root22 / "installer" / "majestic_helper.iss"
+        check("v3.12.0: installer/majestic_helper.iss существует", iss22.is_file())
+        iss_t = iss22.read_text(encoding="utf-8-sig") if iss22.is_file() else ""
+        # строки-продолжения Inno ("\ ..." в конце строки) склеиваем в одну
+        flat22 = iss_t.replace("\\\n", " ").splitlines()
+        check("v3.12.0: установка без прав администратора (PrivilegesRequired=lowest)",
+              "PrivilegesRequired=lowest" in iss_t)
+        check("v3.12.0: папка установки как у УСТАНОВИТЬ.bat (%LOCALAPPDATA%)",
+              "{localappdata}\\MajesticTextHelper" in iss_t)
+        check("v3.12.0: ярлык на рабочий стол ({userdesktop} + задача desktopicon)",
+              "{userdesktop}" in iss_t and "desktopicon" in iss_t)
+        check("v3.12.0: ярлык на рабочем столе включён по умолчанию",
+              not any("desktopicon" in ln and "unchecked" in ln for ln in flat22))
+        check("v3.12.0: автозапуск с Windows — галочка выключена по умолчанию",
+              "{userstartup}" in iss_t
+              and any("autostart" in ln and "unchecked" in ln for ln in flat22))
+        check("v3.12.0: мастер на русском (Russian.isl)", "Russian.isl" in iss_t)
+        check("v3.12.0: папка data не в пакете — фразы не перезаписать и не удалить",
+              'DestDir: "{app}\\data"' not in iss_t)
+        check("v3.12.0: стабильный AppId — обновление поверх старой версии",
+              re.search(r"AppId=\{\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-", iss_t) is not None)
+        check("v3.12.0: закрывает запущенную программу при обновлении",
+              "CloseApplications=yes" in iss_t)
+        m22 = re.search(r'#define APP_VERSION\s+"([^"]+)"', iss_t)
+        check("v3.12.0: версия в установщике = версия программы",
+              m22 is not None and m22.group(1) == _ver)
+        bat22 = root22 / "build_installer.bat"
+        check("v3.12.0: build_installer.bat существует", bat22.is_file())
+        bat_t = bat22.read_text(encoding="utf-8", errors="replace") if bat22.is_file() else ""
+        check("v3.12.0: bat: PyInstaller → ISCC → /DAPP_VERSION",
+              "majestic_helper.spec" in bat_t and "ISCC" in bat_t
+              and "/DAPP_VERSION" in bat_t and "majestic_helper.iss" in bat_t)
+        wf22 = root22 / ".github" / "workflows" / "build-installer.yml"
+        check("v3.12.0: workflow автосборки существует", wf22.is_file())
+        wf_t = wf22.read_text(encoding="utf-8") if wf22.is_file() else ""
+        check("v3.12.0: CI: windows-latest + innosetup + Release по тегу",
+              "windows-latest" in wf_t and "innosetup" in wf_t
+              and "gh-release" in wf_t and '"v*"' in wf_t)
+        rd22 = root22 / "README.md"
+        rd_t = rd22.read_text(encoding="utf-8") if rd22.is_file() else ""
+        check("v3.12.0: README описывает сборку установщика",
+              "build_installer" in rd_t and "Inno Setup" in rd_t)
+    except Exception as e:
+        check(f"v3.12.0: {type(e).__name__}: {e}", False)
 
     return _finish()
 
