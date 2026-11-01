@@ -5,6 +5,7 @@ import ctypes
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal, Slot
@@ -19,7 +20,8 @@ from ..config import APP_NAME, get_screenshots_dir
 from ..icons import app_icon
 from ..journal import log
 from ..models import (
-    CATEGORIES, TextEntry, format_discord_message, normalize_hotkey,
+    CATEGORIES, TextEntry, format_discord_message, get_gov_action_prefs,
+    normalize_hotkey,
 )
 from ..sender import SendWorker, Sender
 from .. import APP_VERSION
@@ -29,10 +31,10 @@ from .editor import TextEditorDialog
 from .flow_layout import FlowLayout
 from .gov_countdown import GovCountdownBadge
 from .gov_notify import GovNotifyToast
-from .gov_overlay import GovWaveOverlay, MacroConfirmDialog
+from .gov_overlay import GovActionPrefsDialog, GovWaveOverlay, MacroConfirmDialog
 from .gov_wave import (
-    GovWavePage, gov_alert_state, now_in_tz, plan_macro_sequence,
-    plan_macro_sequence_keys,
+    GovWavePage, gov_action_shot_delay_ms, gov_alert_state, now_in_tz,
+    plan_macro_sequence, plan_macro_sequence_keys,
 )
 from .settings import SettingsPage
 from .theme import build_qss
@@ -161,6 +163,11 @@ class MainWindow(QWidget):
         self._gov_overlay.slots_updated.connect(self._on_gov_slots_updated)
         self._macro_dialog = MacroConfirmDialog(self.store)
         self._macro_dialog.confirmed.connect(self._macro_confirmed)
+        # v3.11.0: настройки каждого действия F7 (авто-Enter, скриншот, папка)
+        self._gov_last_click = 0.0
+        self._gov_prefs_dlg = GovActionPrefsDialog(self.store)
+        self._gov_overlay.action_settings.connect(self._gov_prefs_dlg.open_for)
+        self._gov_prefs_dlg.saved.connect(self._on_gov_prefs_saved)
 
         # --- v3.10.0: F9-цикл «госволна → одобрение → скриншот → Discord» ---
         self._dc_dialog = DiscordConfirmDialog(self.store)
@@ -525,10 +532,80 @@ class MainWindow(QWidget):
             return
         self._macro_dialog.open_dialog()
 
-    def _send_gov_text(self, title: str, text: str) -> None:
-        self._worker.requested.emit(
-            TextEntry(title=title, text=text, category="Госволна")
+    def _send_gov_text(self, key: str, title: str, text: str) -> None:
+        """Клик по действию в меню F7 (v3.11.0): вставка + авто-Enter + скриншот.
+
+        Base-правило «Enter не нажимается» остаётся: авто-Enter срабатывает
+        ТОЛЬКО если включён галочкой в настройках этого конкретного действия
+        (⚙ рядом с командой) — это явное исключение, как у макроса F8.
+        Скриншот всего экрана — тоже по галочке действия, сохраняется в
+        папку действия (или data\\screenshots).
+        """
+        now_mono = time.monotonic()
+        if now_mono - self._gov_last_click < 0.7:
+            return                      # двойной клик — защита от задвоения
+        self._gov_last_click = now_mono
+        if (self._seq and self._seq_i < len(self._seq)) \
+                or self._dc_state != "idle":
+            self.show_toast("Дождитесь завершения макроса/F9-цикла")
+            return
+        s = self.store.settings
+        prefs = get_gov_action_prefs(s, key)
+        method = getattr(s, "inject_method", "unicode") or "unicode"
+        press_enter = bool(prefs["enter_after"]) and method != "copy"
+        do_shot = bool(prefs["screenshot_after"]) and method != "copy"
+        log(f"Госволна: действие «{key}» ({title}); "
+            f"авто-Enter={press_enter}, скриншот={do_shot}")
+        self._worker.requested_seq.emit(
+            TextEntry(title=title, text=text, category="Госволна"),
+            press_enter,
         )
+        if method == "copy":
+            if prefs["enter_after"] or prefs["screenshot_after"]:
+                self.show_toast(
+                    "Режим «буфер»: вы вставляете сами — Enter и скриншот "
+                    "по действию не делаются"
+                )
+            return
+        if do_shot:
+            delay = gov_action_shot_delay_ms(s, text, press_enter)
+            QTimer.singleShot(
+                delay, lambda: self._gov_action_screenshot(key, title)
+            )
+            log(f"Госволна: скриншот действия «{key}» через {delay} мс")
+
+    def _gov_action_screenshot(self, key: str, title: str) -> None:
+        """Скриншот ВСЕГО экрана после действия F7 — в папку действия (v3.11.0)."""
+        try:
+            prefs = get_gov_action_prefs(self.store.settings, key)
+            target = None
+            d = prefs.get("screenshot_dir") or ""
+            if d:
+                target = Path(d)
+                try:
+                    target.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    log(f"F7-скриншот: папка {d} недоступна ({e}) — "
+                        "сохраняю в папку программы")
+                    target = None
+            if target is None:
+                target = Path(get_screenshots_dir())
+            shot = QApplication.primaryScreen().grabWindow(0)
+            path = target / f"{datetime.now():%Y%m%d-%H%M%S}-{key}.png"
+            if not shot.save(str(path), "PNG"):
+                raise RuntimeError("не удалось сохранить PNG")
+            log(f"F7-скриншот: {path}")
+            self.show_toast(f"📸 Скриншот сохранён: {path}")
+        except Exception as e:
+            log(f"F7-скриншот: ошибка {e}")
+            self.show_toast(f"Скриншот не удался: {e}")
+
+    def _on_gov_prefs_saved(self, key: str) -> None:
+        """Настройки действия F7 сохранены — обновить пометки в меню."""
+        try:
+            self._gov_overlay._refresh()
+        except Exception as e:
+            log(f"Госволна: обновление меню после настроек: {e}")
 
     def _on_gov_slots_updated(self) -> None:
         try:

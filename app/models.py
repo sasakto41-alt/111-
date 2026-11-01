@@ -224,6 +224,8 @@ class Settings:
     discord_msg_template: str = "Госволна {N}"  # {N} → «4/13»
     discord_timeout_min: int = 5        # сколько ждать одобрения (1..30)
     discord_webhook: str = ""           # запасная отправка, если окно Discord не найдено
+    # v3.11.0: настройки каждого действия меню F7 (авто-Enter, скриншот, папка)
+    gov_action_prefs: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -342,6 +344,19 @@ class Settings:
         if not isinstance(self.discord_webhook, str):
             self.discord_webhook = ""
         self.discord_webhook = self.discord_webhook.strip()
+        # v3.11.0: prefs действий F7 — только известные ключи и правильные типы
+        if not isinstance(self.gov_action_prefs, dict):
+            self.gov_action_prefs = {}
+        _clean_prefs: dict = {}
+        for _pk, _pv in self.gov_action_prefs.items():
+            if _pk not in GOV_MACRO_ACTIONS or not isinstance(_pv, dict):
+                continue
+            _clean_prefs[_pk] = {
+                "enter_after": bool(_pv.get("enter_after", False)),
+                "screenshot_after": bool(_pv.get("screenshot_after", False)),
+                "screenshot_dir": str(_pv.get("screenshot_dir", "") or "").strip(),
+            }
+        self.gov_action_prefs = _clean_prefs
 
     def validate(self) -> List[str]:
         errs: List[str] = []
@@ -383,6 +398,62 @@ class Settings:
         if _ck in _taken or _ck == _dk:
             errs.append("клавиша отмены ожидания совпадает с другой меню-клавишей")
         return errs
+
+
+# ------------------------------------------------ действия меню F7 (v3.11.0) --
+GOV_ACTION_PREF_KEYS = ("enter_after", "screenshot_after", "screenshot_dir")
+
+
+def get_gov_action_prefs(settings, key: str) -> dict:
+    """Настройки действия меню F7: {enter_after, screenshot_after, screenshot_dir}.
+
+    Отсутствует/битое значение → всё выключено, папка пустая (папка программы).
+    """
+    raw = getattr(settings, "gov_action_prefs", None)
+    p = raw.get(key) if isinstance(raw, dict) else None
+    p = p if isinstance(p, dict) else {}
+    return {
+        "enter_after": bool(p.get("enter_after", False)),
+        "screenshot_after": bool(p.get("screenshot_after", False)),
+        "screenshot_dir": str(p.get("screenshot_dir", "") or "").strip(),
+    }
+
+
+def set_gov_action_prefs(settings, key: str, enter_after: bool,
+                         screenshot_after: bool, screenshot_dir: str = "") -> None:
+    """Сохранить настройки одного действия F7 (в settings.gov_action_prefs).
+
+    Если всё выключено и папка пуста — запись удаляется, чтобы не хранить мусор.
+    """
+    if key not in GOV_MACRO_ACTIONS:
+        raise ValueError(f"неизвестное действие Госволны: {key}")
+    prefs = getattr(settings, "gov_action_prefs", None)
+    if not isinstance(prefs, dict):
+        prefs = {}
+    entry = {
+        "enter_after": bool(enter_after),
+        "screenshot_after": bool(screenshot_after),
+        "screenshot_dir": str(screenshot_dir or "").strip(),
+    }
+    if not entry["enter_after"] and not entry["screenshot_after"] \
+            and not entry["screenshot_dir"]:
+        prefs.pop(key, None)
+    else:
+        prefs[key] = entry
+    settings.gov_action_prefs = prefs
+
+
+def gov_action_prefs_badge(settings, key: str) -> str:
+    """Короткая пометка на кнопке действия в меню F7: «Enter · 📸 · 📁»."""
+    p = get_gov_action_prefs(settings, key)
+    marks: List[str] = []
+    if p["enter_after"]:
+        marks.append("Enter")
+    if p["screenshot_after"]:
+        marks.append("📸")
+    if p["screenshot_dir"]:
+        marks.append("📁")
+    return " · ".join(marks)
 
 
 def format_discord_message(settings, number: int) -> str:

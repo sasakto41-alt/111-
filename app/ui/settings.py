@@ -15,8 +15,10 @@ from PySide6.QtWidgets import (
 from .. import ocr_watch, porting, window_utils
 from ..models import (
     GOV_MACRO_ACTIONS, GOV_MACRO_LABELS, INJECT_HINTS, INJECT_LABELS,
-    INJECT_METHODS, timezone_options,
+    INJECT_METHODS, get_gov_action_prefs, gov_action_prefs_badge,
+    timezone_options,
 )
+from .gov_overlay import GovActionPrefsDialog
 from .theme import DANGER, MUTED, OK
 from .widgets import SectionFrame
 
@@ -425,6 +427,35 @@ class SettingsPage(QWidget):
         sec_dc.body_layout().addWidget(lbl_dc_hint)
         v.addWidget(sec_dc)
 
+        # --------------- Действия меню F7: авто-Enter и скриншоты (v3.11.0) --
+        sec_ga = SectionFrame("Действия меню F7: авто-Enter и скриншоты")
+        lbl_ga = QLabel(
+            "Для КАЖДОГО действия меню Госволны (F7) можно включить своё: "
+            "авто-Enter после вставки, скриншот всего экрана и отдельная "
+            "папка для скриншотов. Там же кнопка ⚙ прямо в меню F7."
+        )
+        lbl_ga.setObjectName("hint")
+        lbl_ga.setWordWrap(True)
+        sec_ga.body_layout().addWidget(lbl_ga)
+        self._gov_action_status: dict = {}
+        for _gk in GOV_MACRO_ACTIONS:
+            row_ga = QHBoxLayout()
+            row_ga.addWidget(QLabel(GOV_MACRO_LABELS.get(_gk, _gk)), 1)
+            st_ga = QLabel("")
+            st_ga.setObjectName("hint")
+            self._gov_action_status[_gk] = st_ga
+            row_ga.addWidget(st_ga, 2)
+            btn_ga = QPushButton("Настроить…")
+            btn_ga.setToolTip(
+                "Авто-Enter, скриншот и папка для этого действия"
+            )
+            btn_ga.clicked.connect(
+                lambda _=False, k=_gk: self._open_gov_action_prefs(k)
+            )
+            row_ga.addWidget(btn_ga)
+            sec_ga.body_layout().addLayout(row_ga)
+        v.addWidget(sec_ga)
+
         # ------------------------------ экспорт и импорт (v3.8.0) --
         sec_port = SectionFrame("Экспорт и импорт (перенос на другой ПК)")
         h_port = QHBoxLayout()
@@ -550,6 +581,7 @@ class SettingsPage(QWidget):
 
     def _load_fields(self) -> None:
         s = self.store.settings
+        self._refresh_gov_action_status()
         self.ed_menu.setText(s.menu_hotkey.upper())
         self.ed_type.setText(s.type_key)
         self.sp_delay.setValue(s.pre_delay_ms)
@@ -707,6 +739,24 @@ class SettingsPage(QWidget):
             self.ed_gov_menu.setText(s.gov_menu_hotkey.upper())
         self.store.save()
         self._emit_changed()
+
+    # ------------------------ действия меню F7: авто-Enter/скриншот (v3.11.0) --
+    def _refresh_gov_action_status(self) -> None:
+        """Строка-статус у каждого действия: «Enter · 📸 · 📁» или «—»."""
+        if not getattr(self, "_gov_action_status", None):
+            return
+        s = self.store.settings
+        for key, lbl in self._gov_action_status.items():
+            badge = gov_action_prefs_badge(s, key)
+            lbl.setText(badge if badge else "— по умолчанию")
+
+    def _open_gov_action_prefs(self, key: str) -> None:
+        dlg = getattr(self, "_gov_prefs_dlg", None)
+        if dlg is None:
+            dlg = GovActionPrefsDialog(self.store)
+            dlg.saved.connect(lambda _k: self._refresh_gov_action_status())
+            self._gov_prefs_dlg = dlg
+        dlg.open_for(key)
 
     def _apply_macro(self, *_a) -> None:
         if self._busy_loading():

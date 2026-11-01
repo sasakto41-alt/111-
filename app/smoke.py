@@ -1240,6 +1240,200 @@ def run_smoke() -> int:
     except Exception as e:
         check(f"v3.10.0: {type(e).__name__}: {e}", False)
 
+    # 22. v3.11.0: настройки каждого действия F7 (авто-Enter, скриншот, папка)
+    try:
+        from app import models as _m11
+        from app import APP_VERSION as _ver11
+        from app.storage import Store as _Store11
+        from app.ui.gov_overlay import (
+            GovActionPrefsDialog as _GAPD, GovWaveOverlay as _GWO11,
+        )
+        from app.ui.gov_wave import gov_action_shot_delay_ms as _delay11
+        from app.ui.main_window import MainWindow as _MW11
+
+        check("v3.11.0: версия >= 3.11.0",
+              tuple(int(x) for x in _ver11.split(".")) >= (3, 11, 0))
+
+        # --- чистые функции prefs ---
+        s11 = _m11.Settings()
+        p11 = _m11.get_gov_action_prefs(s11, "step2")
+        check("v3.11.0: prefs действия по умолчанию выключены",
+              p11 == {"enter_after": False, "screenshot_after": False,
+                      "screenshot_dir": ""})
+        _m11.set_gov_action_prefs(s11, "step2", True, True, r"C:\Shots")
+        s11b = _m11.Settings.from_dict(s11.to_dict())
+        check("v3.11.0: prefs переживают to_dict/from_dict",
+              _m11.get_gov_action_prefs(s11b, "step2")["enter_after"] is True
+              and _m11.get_gov_action_prefs(s11b, "step2")["screenshot_dir"]
+              == r"C:\Shots")
+        _m11.set_gov_action_prefs(s11b, "step2", False, False, "")
+        check("v3.11.0: все галочки выкл → запись удалена из settings",
+              "step2" not in (s11b.gov_action_prefs or {}))
+        try:
+            _m11.set_gov_action_prefs(s11b, "junk", True, False)
+            ok11 = False
+        except ValueError:
+            ok11 = True
+        check("v3.11.0: неизвестный ключ действия отвергается", ok11)
+        s11.gov_action_prefs = {
+            "step1": {"enter_after": 1, "screenshot_after": [], "screenshot_dir": 5},
+            "junk": {"enter_after": True},
+        }
+        s11.normalize()
+        p11c = s11.gov_action_prefs
+        check("v3.11.0: normalize чистит чужие ключи и типы",
+              set(p11c) == {"step1"}
+              and p11c["step1"]["enter_after"] is True
+              and p11c["step1"]["screenshot_after"] is False
+              and p11c["step1"]["screenshot_dir"] == "5")
+        check("v3.11.0: бейдж пуст у действия без настроек",
+              _m11.gov_action_prefs_badge(_m11.Settings(), "step2") == "")
+        _m11.set_gov_action_prefs(s11b, "step3", True, True, r"D:\S")
+        check("v3.11.0: бейдж показывает Enter и 📸",
+              "Enter" in _m11.gov_action_prefs_badge(s11b, "step3")
+              and "📸" in _m11.gov_action_prefs_badge(s11b, "step3"))
+
+        # --- оценка задержки скриншота ---
+        d_on = _delay11(_m11.Settings(), "x" * 60, True)
+        d_off = _delay11(_m11.Settings(), "x" * 60, False)
+        check("v3.11.0: задержка скриншота в разумных пределах",
+              1200 <= d_on <= 20000 and d_on > d_off)
+        s_cv = _m11.Settings()
+        s_cv.inject_method = "ctrlv"
+        check("v3.11.0: Ctrl+V быстрее наборки",
+              _delay11(s_cv, "x" * 60, False) < d_off)
+
+        with tempfile.TemporaryDirectory() as td11:
+            st11 = _Store11(path=Path(td11) / "d.json")
+            sA11 = st11.settings
+
+            # --- диалог настройки действия ---
+            _m11.set_gov_action_prefs(sA11, "step2", False, True, "")
+            dlg11 = _GAPD(st11)
+            dlg11.open_for("step2")
+            check("v3.11.0: диалог открылся для step2",
+                  dlg11.isVisible() and "Занять" in dlg11.lbl_title.text())
+            check("v3.11.0: галочки прочитаны из prefs",
+                  dlg11.chk_shot.isChecked()
+                  and not dlg11.chk_enter.isChecked())
+            dlg11.chk_enter.setChecked(True)
+            dlg11.ed_dir.setText(str(Path(td11) / "shots"))
+            got11: list = []
+            dlg11.saved.connect(lambda k: got11.append(k))
+            dlg11._on_save()
+            check("v3.11.0: «Сохранить» записал prefs и скрыл диалог",
+                  got11 == ["step2"] and not dlg11.isVisible()
+                  and st11.settings.gov_action_prefs["step2"]["enter_after"] is True
+                  and st11.settings.gov_action_prefs["step2"]["screenshot_dir"]
+                  == str(Path(td11) / "shots"))
+            dlg11b = _GAPD(st11)
+            dlg11b.open_for("junk_key")
+            check("v3.11.0: диалог не открывается для чужого ключа",
+                  not dlg11b.isVisible())
+
+            # --- меню F7: кнопки и сигнал с ключом ---
+            ov11 = _GWO11(st11)
+            check("v3.11.0: в меню 7 команд с пометками настроек",
+                  len(ov11._cmd_buttons) == 7)
+            sig11: list = []
+            ov11.trigger_command.connect(lambda k, t, c: sig11.append((k, t, c)))
+            ov11._cmd_buttons[1][1].click()     # кнопка «2. Занять волну»
+            check("v3.11.0: клик по команде отдаёт ключ, подпись и текст",
+                  len(sig11) == 1 and sig11[0][0] == "step2"
+                  and "Занять" in sig11[0][1] and sig11[0][2])
+
+            # --- главное окно: поток действия F7 ---
+            win11 = _MW11(st11, _HM10())
+            # сбросить prefs step2 (оставались от теста диалога)
+            _m11.set_gov_action_prefs(st11.settings, "step2", False, False, "")
+            check("v3.11.0: в главном окне диалог действий и защита от даблклика",
+                  hasattr(win11, "_gov_prefs_dlg")
+                  and win11._gov_last_click == 0.0)
+            import time as _t11
+
+            # перехват отправки: send_text воркер зовёт уже из своего потока,
+            # поэтому патчим быстрый метод (без реальных пауз наборки)
+            rec11: list = []
+            win11.sender.send_text = lambda entry, press_enter=False: rec11.append(
+                (entry.text, bool(press_enter))
+            )
+            toasts11: list = []
+            win11.show_toast = lambda m: toasts11.append(str(m))
+
+            def _wait_rec(n: int, timeout_s: float = 5.0) -> bool:
+                _t0 = _t11.monotonic()
+                while _t11.monotonic() - _t0 < timeout_s:
+                    if len(rec11) >= n:
+                        return True
+                    _t11.sleep(0.02)
+                return len(rec11) >= n
+
+            # первый клик + сразу даблклик (< 0.7 с) — второй должен отпасть
+            win11._gov_last_click = 0.0
+            win11._send_gov_text("step2", "L", "ТЕКСТ-1")
+            win11._send_gov_text("step2", "L", "ТЕКСТ-2")
+            check("v3.11.0: без галочек — вставка без Enter (базовое правило)",
+                  _wait_rec(1) and rec11[0] == ("ТЕКСТ-1", False))
+            _t11.sleep(0.3)
+            check("v3.11.0: даблклик в пределах 0.7 с отброшен",
+                  len(rec11) == 1)
+            _m11.set_gov_action_prefs(st11.settings, "step3", True, False, "")
+            win11._gov_last_click = 0.0
+            win11._send_gov_text("step3", "L", "ТЕКСТ-3")
+            check("v3.11.0: галочка действия → программа сама жмёт Enter",
+                  _wait_rec(2) and rec11[1] == ("ТЕКСТ-3", True))
+            win11._dc_state = "wait"
+            win11._gov_last_click = 0.0
+            win11._send_gov_text("step3", "L", "ТЕКСТ-4")
+            check("v3.11.0: во время F9-цикла действие F7 заблокировано",
+                  len(rec11) == 2 and any("Дождитесь" in t for t in toasts11))
+            win11._dc_state = "idle"
+            st11.settings.inject_method = "copy"
+            win11._gov_last_click = 0.0
+            win11._send_gov_text("step3", "L", "ТЕКСТ-5")
+            check("v3.11.0: режим «буфер» — Enter не жмётся, честное предупреждение",
+                  _wait_rec(3) and rec11[2] == ("ТЕКСТ-5", False)
+                  and any("буфер" in t for t in toasts11))
+            st11.settings.inject_method = "unicode"
+
+            # --- скриншот действия: папка из prefs + фолбэк + имя файла ---
+            shots11 = Path(td11) / "shots"
+            st11.settings.gov_action_prefs["step3"]["screenshot_dir"] = str(shots11)
+            win11._gov_action_screenshot("step3", "тест")
+            made11 = list(shots11.glob("*-step3.png"))
+            check("v3.11.0: скриншот сохранён в папку действия с ключом в имени",
+                  len(made11) == 1 and len(made11[0].read_bytes()) > 100)
+            bad11 = Path(td11) / "file.txt"
+            bad11.write_text("x", encoding="utf-8")
+            import app.ui.main_window as _mwmod11
+            orig_gshots11 = _mwmod11.get_screenshots_dir
+
+            def _fake_gshots11():
+                # контракт как у config.get_screenshots_dir: папка существует
+                d = Path(td11) / "defshots"
+                d.mkdir(parents=True, exist_ok=True)
+                return d
+
+            try:
+                _mwmod11.get_screenshots_dir = _fake_gshots11
+                st11.settings.gov_action_prefs["step3"]["screenshot_dir"] = str(bad11)
+                win11._gov_action_screenshot("step3", "тест")
+                made_fb = list((Path(td11) / "defshots").glob("*-step3.png"))
+                check("v3.11.0: плохая папка → фолбэк в папку программы",
+                      len(made_fb) == 1 and toasts11[-1].startswith("📸"))
+            finally:
+                _mwmod11.get_screenshots_dir = orig_gshots11
+
+            # --- страница настроек: список действий и статусы ---
+            pg11 = win11._settings_page
+            check("v3.11.0: в настройках 7 действий со статусами",
+                  set(pg11._gov_action_status) == set(_m11.GOV_MACRO_ACTIONS))
+            check("v3.11.0: статус действия показывает бейдж",
+                  "📸" in pg11._gov_action_status["step2"].text()
+                  or "Enter" in pg11._gov_action_status["step3"].text())
+    except Exception as e:
+        check(f"v3.11.0: {type(e).__name__}: {e}", False)
+
     return _finish()
 
 

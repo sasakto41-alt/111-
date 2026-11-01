@@ -149,6 +149,10 @@ _MACRO_STEP_KEYS = {
     "step5": "5. Освободить волну",
 }
 
+# названия шагов → ключи (v3.11.0): кнопки меню F7 хранят КЛЮЧ действия,
+# чтобы настройки (авто-Enter/скриншот) совпадали с ключами макроса
+CMD_NAME_TO_KEY = {v: k for k, v in _MACRO_STEP_KEYS.items()}
+
 
 def resolve_macro_command(settings, action: str) -> str:
     """Текст команды для макроса по ключу действия (GOV_MACRO_ACTIONS)."""
@@ -193,6 +197,29 @@ def plan_macro_sequence_keys(settings) -> List[Tuple[str, str, str]]:
         if text:
             out.append((st, GOV_MACRO_LABELS.get(st, st), text))
     return out
+
+
+def gov_action_shot_delay_ms(settings, text: str, press_enter: bool) -> int:
+    """Сколько ждать после клика по действию F7 до скриншота (v3.11.0).
+
+    Рабочий поток сам печатает текст (сигнала «готово» нет), поэтому считаем
+    честную оценку: фокус+чат → пауза перед вводом → набор/вставка →
+    (Enter) → чат должен отрисоваться. Ограничение 1.2–20 с.
+    """
+    method = getattr(settings, "inject_method", "unicode") or "unicode"
+    try:
+        pre = int(getattr(settings, "pre_delay_ms", 1000) or 1000)
+    except Exception:
+        pre = 1000
+    pre = max(100, min(10000, pre))
+    if method == "unicode":
+        typing = len(text or "") * 4 + 400   # ~4 мс на символ + запас
+    elif method == "ctrlv":
+        typing = 500                          # буфер + Ctrl+V
+    else:                                     # «copy» — скриншот не делаем
+        typing = 0
+    delay = 700 + pre + typing + (600 if press_enter else 0) + 900
+    return max(1200, min(20000, delay))
 
 
 def gov_alert_state(settings, now: Optional[datetime] = None,

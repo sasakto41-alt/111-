@@ -23,20 +23,25 @@ import ctypes
 import sys
 from typing import List, Tuple
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QListWidget, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
-    QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QScrollArea,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .. import window_utils
 from ..journal import log
 from ..models import (
     GOV_MACRO_ACTIONS, GOV_MACRO_LABELS, GNEWS_PALETO, GNEWS_SANDY,
-    INJECT_LABELS,
+    INJECT_LABELS, get_gov_action_prefs, gov_action_prefs_badge,
+    set_gov_action_prefs,
 )
-from .gov_wave import build_commands, gov_slots_for, now_in_tz, plan_macro_sequence, suggest_slots
+from .gov_wave import (
+    CMD_NAME_TO_KEY, build_commands, gov_slots_for, now_in_tz,
+    plan_macro_sequence, suggest_slots,
+)
 from .theme import OK, build_qss
 
 
@@ -102,7 +107,9 @@ class GovWaveOverlay(QWidget):
 
     closed = Signal()
     slots_updated = Signal()               # время пересчитано — страница перечитает
-    trigger_command = Signal(str, str)     # (title, text) — отправить команду
+    # v3.11.0: (ключ действия, подпись, текст) — ключ нужен для настроек действия
+    trigger_command = Signal(str, str, str)
+    action_settings = Signal(str)          # v3.11.0: ⚙ — открыть настройки действия
     macro_changed = Signal()               # v3.6.0: шаги макроса изменены в меню
 
     def __init__(self, store, parent=None):
@@ -341,7 +348,8 @@ class GovWaveOverlay(QWidget):
         org = (getattr(s, "gov_org", "") or "LSCSD").strip() or "LSCSD"
         rows: List[Tuple[str, str, str]] = []
         for name, cmd in build_commands(org, slots):
-            rows.append((name, name, cmd))
+            # v3.11.0: ключ действия = step1..step5 (как в макросе), а не имя
+            rows.append((CMD_NAME_TO_KEY.get(name, name), name, cmd))
         rows.append((
             "gnews_paleto", GOV_MACRO_LABELS["gnews_paleto"],
             getattr(s, "gov_gnews_paleto", "") or GNEWS_PALETO,
@@ -354,15 +362,34 @@ class GovWaveOverlay(QWidget):
             if not cmd:
                 continue
             short = cmd if len(cmd) <= 64 else cmd[:64] + "…"
-            b = QPushButton(f"{label}\n{short}")
+            # v3.11.0: пометка настроек действия на кнопке
+            badge = gov_action_prefs_badge(s, key)
+            title_txt = f"{label}\n{short}" + (f"\n⚙ {badge}" if badge else "")
+            b = QPushButton(title_txt)
             b.setToolTip(cmd)
             b.setCursor(Qt.PointingHandCursor)
             b.setObjectName("govCmd")
             b.setMinimumHeight(52)
             b.clicked.connect(
-                lambda _=False, t=label, c=cmd: self.trigger_command.emit(t, c)
+                lambda _=False, k=key, t=label, c=cmd: self.trigger_command.emit(k, t, c)
             )
-            self.grid_cmds.addWidget(b, i // 2, i % 2)
+            cell = QWidget()
+            cell_l = QHBoxLayout(cell)
+            cell_l.setContentsMargins(0, 0, 0, 0)
+            cell_l.setSpacing(6)
+            cell_l.addWidget(b, 1)
+            gear = QPushButton("⚙")
+            gear.setFixedWidth(34)
+            gear.setMinimumHeight(52)
+            gear.setObjectName("ghost")
+            gear.setCursor(Qt.PointingHandCursor)
+            gear.setToolTip(
+                f"Настройка «{label}»: авто-Enter после вставки, "
+                "скриншот всего экрана и папка для скриншотов"
+            )
+            gear.clicked.connect(lambda _=False, k=key: self.action_settings.emit(k))
+            cell_l.addWidget(gear)
+            self.grid_cmds.addWidget(cell, i // 2, i % 2)
             self._cmd_buttons.append((key, b))
         self.grid_cmds.setRowStretch(len(rows) // 2 + 1, 1)
 
@@ -786,4 +813,211 @@ class MacroConfirmDialog(QWidget):
     def keyPressEvent(self, ev) -> None:  # noqa: N802
         if ev.key() == Qt.Key_Escape:
             self._on_no()
+        super().keyPressEvent(ev)
+
+
+# -------------------------------------- настройки действия F7 (v3.11.0) --
+class GovActionPrefsDialog(QWidget):
+    """Настройка одного действия меню Госволны (кнопка ⚙ рядом с командой).
+
+    Что можно включить для КАЖДОГО действия отдельно:
+      • «После вставки нажать Enter» — программа сама подтвердит чат
+        (исключение из правила «Enter не нажимается» — включаете явно);
+      • «Сделать скриншот всего экрана» — после действия снимок экрана;
+      • «Папка скриншотов» — пусто = папка программы (data\\screenshots).
+    """
+
+    saved = Signal(str)      # ключ действия — меню перерисует пометки
+
+    def __init__(self, store, parent=None):
+        super().__init__(parent)
+        self.store = store
+        self._key = ""
+        self._prev_hwnd = 0
+        _overlay_flags(self)
+        self.setWindowTitle("Настройка действия Госволны")
+        self.setFixedSize(640, 460)
+        self.setStyleSheet(build_qss())
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(8)
+
+        self.lbl_title = QLabel("")
+        f = self.lbl_title.font()
+        f.setBold(True)
+        f.setPointSize(11)
+        self.lbl_title.setFont(f)
+        self.lbl_title.setWordWrap(True)
+        root.addWidget(self.lbl_title)
+
+        self.lbl_cmd = QLabel("")
+        self.lbl_cmd.setObjectName("hint")
+        self.lbl_cmd.setWordWrap(True)
+        root.addWidget(self.lbl_cmd)
+
+        self.chk_enter = QCheckBox("После вставки нажать Enter (отправить в чат)")
+        self.chk_enter.setToolTip(
+            "Программа вставит текст в чат и САМА нажмёт Enter — сообщение "
+            "уйдёт без вашего подтверждения. Включайте только там, где это нужно."
+        )
+        root.addWidget(self.chk_enter)
+        lbl_enter = QLabel(
+            "Обычно программа Enter НЕ нажимает — это включает вы, для одного "
+            "конкретного действия. В режиме «буфер» Enter всё равно не нажмётся."
+        )
+        lbl_enter.setObjectName("hint")
+        lbl_enter.setWordWrap(True)
+        lbl_enter.setContentsMargins(24, 0, 0, 0)
+        root.addWidget(lbl_enter)
+
+        self.chk_shot = QCheckBox("Сделать скриншот всего экрана после действия")
+        self.chk_shot.setToolTip(
+            "После вставки (и Enter, если он включён) программа снимет весь "
+            "экран — без надписей и обрезки — и сохранит в PNG."
+        )
+        root.addWidget(self.chk_shot)
+        lbl_shot = QLabel(
+            "Скриншот делается через паузу после отправки (чат должен успеть "
+            "показать сообщение). Работает при способах вставки «наборка» и "
+            "«Ctrl+V»; в режиме «буфер» не делается — вы вставляете сами."
+        )
+        lbl_shot.setObjectName("hint")
+        lbl_shot.setWordWrap(True)
+        lbl_shot.setContentsMargins(24, 0, 0, 0)
+        root.addWidget(lbl_shot)
+
+        root.addWidget(QLabel("Папка для скриншотов этого действия:"))
+        row_dir = QHBoxLayout()
+        self.ed_dir = QLineEdit()
+        self.ed_dir.setPlaceholderText(
+            "пусто — папка программы data\\screenshots"
+        )
+        row_dir.addWidget(self.ed_dir, 1)
+        btn_pick = QPushButton("Выбрать…")
+        btn_pick.clicked.connect(self._pick_dir)
+        row_dir.addWidget(btn_pick)
+        btn_reset = QPushButton("Папка программы")
+        btn_reset.setObjectName("ghost")
+        btn_reset.setToolTip("Вернуть папку по умолчанию (data\\screenshots)")
+        btn_reset.clicked.connect(self.ed_dir.clear)
+        row_dir.addWidget(btn_reset)
+        root.addLayout(row_dir)
+
+        row_open = QHBoxLayout()
+        btn_open = QPushButton("📂 Открыть папку")
+        btn_open.clicked.connect(self._open_dir)
+        row_open.addWidget(btn_open)
+        row_open.addStretch(1)
+        root.addLayout(row_open)
+
+        root.addStretch(1)
+
+        h = QHBoxLayout()
+        self.btn_save = QPushButton("Сохранить")
+        self.btn_save.setObjectName("primary")
+        self.btn_save.clicked.connect(self._on_save)
+        h.addWidget(self.btn_save, 1)
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.setObjectName("ghost")
+        btn_cancel.clicked.connect(self._on_cancel)
+        h.addWidget(btn_cancel, 1)
+        root.addLayout(h)
+
+        self.lbl_hint = QLabel("Esc — закрыть без сохранения.")
+        self.lbl_hint.setObjectName("hint")
+        self.lbl_hint.setWordWrap(True)
+        root.addWidget(self.lbl_hint)
+
+    # ------------------------------------------------------------------ показ --
+    def open_for(self, key: str) -> None:
+        from ..models import GOV_MACRO_LABELS as _LBL
+        from .gov_wave import resolve_macro_command
+
+        s = self.store.settings
+        if key not in GOV_MACRO_ACTIONS:
+            log(f"действие F7: неизвестный ключ {key!r} — настройки не открыты")
+            return
+        self._key = key
+        label = _LBL.get(key, key)
+        self.lbl_title.setText(f"Настройка действия: {label}")
+        cmd = resolve_macro_command(s, key)
+        short = cmd if len(cmd) <= 140 else cmd[:140] + "…"
+        self.lbl_cmd.setText(f"Текст действия: {short}" if cmd else
+                             "(текст пуст — заполните шаблон в разделе «Госволна»)")
+        prefs = get_gov_action_prefs(s, key)
+        self.chk_enter.setChecked(bool(prefs["enter_after"]))
+        self.chk_shot.setChecked(bool(prefs["screenshot_after"]))
+        self.ed_dir.setText(str(prefs["screenshot_dir"] or ""))
+        self._prev_hwnd = window_utils.get_foreground_hwnd()
+        move_to_screen_of(self, self._prev_hwnd)
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        raise_topmost(self)
+        log(f"действие F7: настройки «{label}» открыты "
+            f"(enter={prefs['enter_after']}, shot={prefs['screenshot_after']})")
+
+    # ----------------------------------------------------------------- папки --
+    def _target_dir(self) -> str:
+        d = self.ed_dir.text().strip()
+        if d:
+            return d
+        from ..config import get_screenshots_dir
+
+        return str(get_screenshots_dir())
+
+    def _pick_dir(self) -> None:
+        start = self._target_dir()
+        d = QFileDialog.getExistingDirectory(
+            self, "Папка для скриншотов действия", start
+        )
+        if d:
+            self.ed_dir.setText(d)
+
+    def _open_dir(self) -> None:
+        from pathlib import Path
+
+        d = Path(self._target_dir())
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log(f"действие F7: папка не создана: {e}")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
+
+    # ----------------------------------------------------------- сохранить --
+    def _on_save(self) -> None:
+        try:
+            set_gov_action_prefs(
+                self.store.settings, self._key,
+                self.chk_enter.isChecked(), self.chk_shot.isChecked(),
+                self.ed_dir.text(),
+            )
+            self.store.save()
+            log(f"действие F7: «{self._key}» сохранено "
+                f"(enter={self.chk_enter.isChecked()}, "
+                f"shot={self.chk_shot.isChecked()}, "
+                f"dir={self.ed_dir.text().strip() or 'по умолчанию'})")
+            self.saved.emit(self._key)
+        except Exception as e:
+            log(f"действие F7: ошибка сохранения: {e}")
+        self._restore_focus()
+        self.hide()
+
+    def _on_cancel(self) -> None:
+        self._restore_focus()
+        self.hide()
+
+    def _restore_focus(self) -> None:
+        if self._prev_hwnd and sys.platform == "win32":
+            try:
+                window_utils.focus_window(self._prev_hwnd)
+            except Exception:
+                pass
+
+    def keyPressEvent(self, ev) -> None:  # noqa: N802
+        if ev.key() == Qt.Key_Escape:
+            self._on_cancel()
         super().keyPressEvent(ev)
